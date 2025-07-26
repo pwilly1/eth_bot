@@ -11,14 +11,12 @@ os.makedirs(LOG_DIR, exist_ok=True)
 def save_token_log(data):
     data["timestamp"] = datetime.now(tz=timezone.utc).isoformat() + "Z"
 
-    # Load existing logs
-    if os.path.exists(LOG_FILE):
-        with open(LOG_FILE, "r") as f:
-            try:
+    try:
+        logs = []
+        if os.path.exists(LOG_FILE):
+            with open(LOG_FILE, "r") as f:
                 logs = json.load(f)
-            except json.JSONDecodeError:
-                logs = []
-    else:
+    except json.JSONDecodeError:
         logs = []
 
     logs.append(data)
@@ -26,4 +24,3 @@ def save_token_log(data):
     with open(LOG_FILE, "w") as f:
         json.dump(logs, f, indent=2)
 
-    print(" 💾 Token data saved to logs/tokens.json")
