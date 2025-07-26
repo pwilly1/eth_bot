@@ -1,0 +1,30 @@
+# === Python Cache ===
+__pycache__/
+*.py[cod]
+*.pyo
+
+# === Virtual Environment ===
+venv/
+
+# === Environment Variables ===
+.env
+
+# === Logs ===
+logs/
+*.log
+
+# === OS-specific ===
+.DS_Store
+Thumbs.db
+
+# === VSCode-specific ===
+.vscode/
+
+# === Bytecode / Build ===
+*.egg-info/
+dist/
+build/
+
+
+# === Personal Jupyter / Dev Files ===
+*.ipynb_checkpoints
