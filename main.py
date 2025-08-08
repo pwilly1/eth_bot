@@ -12,7 +12,7 @@ import threading
 
 
 def run_blockchain_listener():
-    print("▶️ run_blockchain_listener STARTED", flush=True)
+    print("▶run_blockchain_listener STARTED", flush=True)
 
     # === Load .env ===
     load_dotenv()
@@ -66,7 +66,6 @@ def run_blockchain_listener():
                 # Deployer Check 
                 tx = web3.eth.get_transaction(log["transactionHash"])
                 deployer = tx["from"].lower()
-                update_token_log(f"📦 New Pair: {token0} + {token1}")
                 print("\n🇵 New Pair Created!")
                 print(f"Pair Address: {pair}")
                 print(f"Deployer: {deployer}")
@@ -85,7 +84,17 @@ def run_blockchain_listener():
 
                 print(f"→ Token0: {result['token0']}")
                 print(f"→ Token1: {result['token1']}")
-                update_token_log(f"Honeypot: {result['honeypot']}, Liquidity: {result['liquidity_eth']}")
+                
+                # Update GUI with detailed token information
+                token_info = {
+                    'address': token0,  # Using token0 as the main token
+                    'pair_address': pair,
+                    'liquidity_eth': result['liquidity_eth'],
+                    'honeypot': result['honeypot'],
+                    'ownership_renounced': result['ownership_renounced']
+                }
+                update_token_log(token_info)
+                
                 print(f"Honeypot suspected: {result['honeypot']}")
                 print(f"Ownership renounced: {result['ownership_renounced']}")
                 print(f"Liquidity (ETH): {result['liquidity_eth']}")
@@ -108,7 +117,7 @@ if __name__ == "__main__":
     Thread1 = threading.Thread(target=run_blockchain_listener, daemon=True)
 
     # Update GUI status
-    update_status("🟢 Connected & listening…")
+    update_status("Connected & listening…")
     Thread1.start()
     while dpg.is_dearpygui_running():
         dpg.render_dearpygui_frame()
