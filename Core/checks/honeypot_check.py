@@ -29,7 +29,7 @@ def simulate_trade(web3: Web3, token_address: str, router_address: str, weth_add
 
         eth_back_ratio = eth_back / test_amount
 
-        print(f"[🔁] Simulated Buy → Sell Ratio: {eth_back_ratio:.2f}x")
+        print(f"Simulated Buy → Sell Ratio: {eth_back_ratio:.2f}x")
 
         if eth_back_ratio < 0.4:
             print("Potential honeypot — you lose most ETH on sell.")

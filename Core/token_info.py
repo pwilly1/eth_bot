@@ -15,6 +15,17 @@ def get_token_info(web3: Web3, token_address: str):
         name = token_contract.functions.name().call()
         symbol = token_contract.functions.symbol().call()
         decimals = token_contract.functions.decimals().call()
-        return name, symbol, decimals
-    except:
-        return "Unknown", "UNK", 18
+        return {
+              "address": token_address,
+              "name": name,
+              "symbol": symbol,
+              "decimals": decimals
+          }
+    except Exception as e:
+        print(f"Error fetching token info for {token_address}: {e}")
+        return {
+            "address": token_address,
+            "name": "Unknown",
+            "symbol": "UNK",
+            "decimals": 18
+        }

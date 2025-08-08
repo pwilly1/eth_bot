@@ -2,6 +2,7 @@ from Core.token_info import get_token_info
 from Core.checks.liquidity import check_liquidity
 from Core.checks.honeypot_check import simulate_trade
 from Core.checks.ownership_check import is_renounced
+from Core.logger import save_token_log 
 import json
 import os
 
@@ -27,8 +28,13 @@ class TokenAnalyzer:
         result = {}
 
         # Basic token info
-        result["token0_info"] = get_token_info(self.web3, self.token0)
-        result["token1_info"] = get_token_info(self.web3, self.token1)
+        token0_info = get_token_info(self.web3, self.token0)
+        token1_info = get_token_info(self.web3, self.token1)
+
+        result["token0"] = token0_info
+        result["token1"] = token1_info
+        result["pair"] = self.pair
+        result["is_weth_pair"] = self.is_weth_pair()
 
         # Determine target token
         target_token = self.get_target_token()
@@ -45,5 +51,8 @@ class TokenAnalyzer:
         result["liquidity_eth"] = check_liquidity(
             self.web3, self.pair, self.token0, self.token1, WETH
         )
+
+        # Log to file
+        save_token_log(result)
 
         return result
