@@ -9,7 +9,7 @@ function HistoricalData() {
   useEffect(() => {
     const fetchData = async () => {
       try {
-        const historicalDataRes = await fetch('/historical_data');
+        const historicalDataRes = await fetch('/api/historical_data');
         const historicalData = await historicalDataRes.json();
         if (Array.isArray(historicalData)) {
           setHistoricalData(historicalData);

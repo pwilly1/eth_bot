@@ -50,7 +50,7 @@ function App() {
   useEffect(() => {
     const fetchStatus = async () => {
       try {
-        const statusRes = await fetch('/status');
+        const statusRes = await fetch('/api/status');
         const statusData = await statusRes.json();
         setStatus(statusData.status);
       } catch (error) {

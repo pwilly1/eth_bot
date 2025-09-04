@@ -9,7 +9,7 @@ function TokenEvents() {
   useEffect(() => {
     const fetchData = async () => {
       try {
-        const tokenEventsRes = await fetch('/token_events');
+        const tokenEventsRes = await fetch('/api/token_events');
         const tokenEventsData = await tokenEventsRes.json();
         setTokenEvents(tokenEventsData.token_events);
       } catch (error) {

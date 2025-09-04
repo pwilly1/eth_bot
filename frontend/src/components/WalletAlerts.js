@@ -7,7 +7,7 @@ function WalletAlerts() {
   useEffect(() => {
     const fetchData = async () => {
       try {
-        const walletAlertsRes = await fetch('/wallet_alerts');
+        const walletAlertsRes = await fetch('/api/wallet_alerts');
         const walletAlertsData = await walletAlertsRes.json();
         setWalletAlerts(walletAlertsData.wallet_alerts);
       } catch (error) {
