@@ -9,7 +9,7 @@ LOG_FILE = os.path.join(LOG_DIR, "tokens.json")
 os.makedirs(LOG_DIR, exist_ok=True)
 
 def save_token_log(data):
-    data["timestamp"] = datetime.now(tz=timezone.utc).isoformat() + "Z"
+    data["timestamp"] = datetime.now(tz=timezone.utc).isoformat()
 
     try:
         logs = []

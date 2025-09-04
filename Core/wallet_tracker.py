@@ -58,13 +58,13 @@ class WalletTracker:
 
         if sender in self.watchlist or recipient in self.watchlist:
             print(f"{token}: {sender} → {recipient} | {value} tokens")
-            with open("logs/watchlog.json", "a") as f:
-                json.dump({
-                    "timestamp": datetime.utcnow().isoformat() + "Z",
-                    "token": token,
-                    "tx": tx_hash,
-                    "from": sender,
-                    "to": recipient,
-                    "value": str(value)
-                }, f)
-                f.write(",\n")
+            log_entry = {
+                "timestamp": datetime.utcnow().isoformat() + "Z",
+                "token": token,
+                "tx": tx_hash,
+                "from": sender,
+                "to": recipient,
+                "value": str(value)
+            }
+            with open("logs/watchlog.jsonl", "a") as f:
+                f.write(json.dumps(log_entry) + "\n")
