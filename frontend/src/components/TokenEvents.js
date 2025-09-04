@@ -30,7 +30,7 @@ function TokenEvents() {
     const interval = setInterval(fetchData, 5000);
     fetchData();
     return () => clearInterval(interval);
-  }, [q, honeypotOnly]);
+  }, [q, minLiquidity, ownership]);
 
   return (
     <Paper elevation={3} style={{ padding: '20px', margin: '20px 0' }}>
