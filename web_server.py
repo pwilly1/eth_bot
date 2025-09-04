@@ -111,29 +111,29 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(lifespan=lifespan)
 
-@app.get("/")
+@app.get("/api/")
 def read_root():
     return {"status": "ok"}
 
-@app.get("/watchlist")
+@app.get("/api/watchlist")
 def read_watchlist():
     with open("resources/watchlist.json", "r") as f:
         watchlist = json.load(f)
     return {"watchlist": watchlist}
 
-@app.get("/status")
+@app.get("/api/status")
 def get_status():
     return {"status": status_messages[-1] if status_messages else "No status yet."}
 
-@app.get("/token_events")
+@app.get("/api/token_events")
 def get_token_events():
     return {"token_events": token_events}
 
-@app.get("/wallet_alerts")
+@app.get("/api/wallet_alerts")
 def get_wallet_alerts():
     return {"wallet_alerts": wallet_alerts}
 
-@app.get("/historical_data")
+@app.get("/api/historical_data")
 def get_historical_data():
     try:
         with open("logs/tokens.json", "r") as f:
