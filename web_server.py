@@ -320,6 +320,10 @@ def get_status():
 def get_token_events(
     q: Optional[str] = Query(None, description="search token address/name/symbol"),
     honeypot: Optional[bool] = Query(None, description="filter honeypot true/false"),
+    min_liquidity: Optional[float] = Query(None, description="minimum liquidity in ETH"),
+    ownership: Optional[bool] = Query(None, description="ownership renounced true/false"),
+    start_ms: Optional[int] = Query(None, description="start time in ms since epoch"),
+    end_ms: Optional[int] = Query(None, description="end time in ms since epoch"),
     limit: int = Query(200, description="max results"),
 ):
     """
@@ -330,12 +334,29 @@ def get_token_events(
         docs: List[Dict[str, Any]] = []
 
         # start of today (UTC): only today's events
-        start_of_day = int(datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0).timestamp())
+        # compute start of today in local timezone and convert to UTC timestamp
+        # this ensures "today" matches the local day of the user running the server
+        local_now = datetime.now().astimezone()
+        start_local = local_now.replace(hour=0, minute=0, second=0, microsecond=0)
+        start_of_day = int(start_local.astimezone(timezone.utc).timestamp())
+
+        # override start/end if provided (client sends ms)
+        if start_ms is not None:
+            start_of_day = int(start_ms // 1000)
+        end_of_day: Optional[int] = None
+        if end_ms is not None:
+            end_of_day = int(end_ms // 1000)
 
         if token_collection is not None:
             query: Dict[str, Any] = {"timestamp": {"$gte": start_of_day}}
+            if end_of_day is not None:
+                query["timestamp"]["$lte"] = end_of_day
             if honeypot is not None:
                 query["honeypot"] = bool(honeypot)
+            if min_liquidity is not None:
+                query["liquidity_eth"] = {"$gte": float(min_liquidity)}
+            if ownership is not None:
+                query["ownership_renounced"] = bool(ownership)
             if q:
                 regex = {"$regex": q, "$options": "i"}
                 query["$or"] = [
@@ -362,9 +383,16 @@ def get_token_events(
         else:
             # in-memory fallback
             for e in token_events:
-                if int(e.get("timestamp", 0)) < start_of_day:
+                ts = int(e.get("timestamp", 0))
+                if ts < start_of_day:
+                    continue
+                if end_of_day is not None and ts > end_of_day:
                     continue
                 if honeypot is not None and bool(e.get("honeypot", False)) != bool(honeypot):
+                    continue
+                if min_liquidity is not None and float(e.get("liquidity_eth", 0.0)) < float(min_liquidity):
+                    continue
+                if ownership is not None and bool(e.get("ownership_renounced", False)) != bool(ownership):
                     continue
                 if q:
                     ql = q.lower()
@@ -422,6 +450,10 @@ def get_wallet_alerts():
 def get_historical_data(
     q: Optional[str] = Query(None, description="search token address/name/symbol"),
     honeypot: Optional[bool] = Query(None, description="filter honeypot true/false"),
+    min_liquidity: Optional[float] = Query(None, description="minimum liquidity in ETH"),
+    ownership: Optional[bool] = Query(None, description="ownership renounced true/false"),
+    start_ms: Optional[int] = Query(None, description="start time in ms since epoch"),
+    end_ms: Optional[int] = Query(None, description="end time in ms since epoch"),
     limit: int = Query(500, description="max results"),
 ):
     """
@@ -434,6 +466,16 @@ def get_historical_data(
             query: Dict[str, Any] = {}
             if honeypot is not None:
                 query["honeypot"] = bool(honeypot)
+            if min_liquidity is not None:
+                query["liquidity_eth"] = {"$gte": float(min_liquidity)}
+            if ownership is not None:
+                query["ownership_renounced"] = bool(ownership)
+            if start_ms is not None or end_ms is not None:
+                query["timestamp"] = {}
+                if start_ms is not None:
+                    query["timestamp"]["$gte"] = int(start_ms // 1000)
+                if end_ms is not None:
+                    query["timestamp"]["$lte"] = int(end_ms // 1000)
             if q:
                 regex = {"$regex": q, "$options": "i"}
                 query["$or"] = [
@@ -461,6 +503,14 @@ def get_historical_data(
             # in-memory fallback
             for e in token_events:
                 if honeypot is not None and bool(e.get("honeypot", False)) != bool(honeypot):
+                    continue
+                if min_liquidity is not None and float(e.get("liquidity_eth", 0.0)) < float(min_liquidity):
+                    continue
+                if ownership is not None and bool(e.get("ownership_renounced", False)) != bool(ownership):
+                    continue
+                if start_ms is not None and int(e.get("timestamp", 0)) * 1000 < start_ms:
+                    continue
+                if end_ms is not None and int(e.get("timestamp", 0)) * 1000 > end_ms:
                     continue
                 if q:
                     ql = q.lower()
