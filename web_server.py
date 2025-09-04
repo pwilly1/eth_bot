@@ -9,14 +9,31 @@ import time
 import threading
 import asyncio
 from contextlib import asynccontextmanager
+from pymongo import MongoClient
+from fastapi.middleware.cors import CORSMiddleware
 
 # Data storage
-token_events = []
+token_events = [] # This will eventually be replaced by MongoDB
 wallet_alerts = []
 status_messages = ["Starting..."]
 
+# MongoDB Connection
+load_dotenv() # Load .env for local MONGO_URI
+MONGO_URI = os.getenv("MONGO_URI")
+if not MONGO_URI:
+    print("MONGO_URI not found in .env file. MongoDB will not be connected.")
+    # Handle this case appropriately, maybe exit or raise an error
+    # For now, we'll just set client to None and handle it in functions
+    client = None
+    db = None
+    token_collection = None
+else:
+    client = MongoClient(MONGO_URI)
+    db = client.eth_bot_db # You can change your database name here
+    token_collection = db.token_events # Collection for token events
+
 def run_blockchain_listener():
-    global token_events, wallet_alerts, status_messages
+    global token_events, wallet_alerts, status_messages, client, db, token_collection
     print("▶ run_blockchain_listener STARTED", flush=True)
     status_messages.append("Blockchain listener started...")
 
@@ -78,7 +95,7 @@ def run_blockchain_listener():
                 deployer = tx["from"].lower()
                 
                 if deployer in WATCHLIST:
-                    message = f"Deployer {deployer} is in watchlist!"
+                    message = f"Deployer {deployer} is in watchlist! ✅"
                     print(f"⚠️ {message}")
                     wallet_alerts.append(message)
                     tracked = {token0.lower(), token1.lower()}
@@ -97,9 +114,19 @@ def run_blockchain_listener():
                     'ownership_renounced': result['ownership_renounced'],
                     'token0_info': result['token0'],
                     'token1_info': result['token1'],
-                    'timestamp': time.time()
+                    'timestamp': time.time() # Store as Unix timestamp
                 }
-                token_events.append(token_info)
+                
+                # Save to MongoDB
+                if token_collection:
+                    try:
+                        token_collection.insert_one(token_info)
+                        print(f"Token info saved to MongoDB: {token_info['address']}")
+                    except Exception as mongo_e:
+                        print(f"Error saving to MongoDB: {mongo_e}")
+                
+                # Keep in memory for current session display (optional, can remove if only using DB)
+                token_events.append(token_info) 
 
             if wallet_tracker_thread and not wallet_tracker_thread.is_alive():
                 wallet_alerts.append("Wallet tracker thread finished.")
@@ -128,10 +155,9 @@ async def lifespan(app: FastAPI):
     yield
     # Clean up the resources if needed
     print("Shutting down...")
-
-app = FastAPI(lifespan=lifespan)
-
-from fastapi.middleware.cors import CORSMiddleware
+    if client:
+        client.close()
+        print("MongoDB client closed.")
 
 app = FastAPI(lifespan=lifespan)
 
@@ -165,7 +191,11 @@ def get_status():
 
 @app.get("/api/token_events")
 def get_token_events():
-    return {"token_events": token_events}
+    # This will now fetch from MongoDB
+    if token_collection:
+        # Convert ObjectId to string for JSON serialization
+        return {"token_events": list(token_collection.find({}, {'_id': 0}))}
+    return {"token_events": []} # Fallback if MongoDB not connected
 
 @app.get("/api/wallet_alerts")
 def get_wallet_alerts():
@@ -173,10 +203,8 @@ def get_wallet_alerts():
 
 @app.get("/api/historical_data")
 def get_historical_data():
-    try:
-        with open("logs/tokens.json", "r") as f:
-            return json.load(f)
-    except FileNotFoundError:
-        return {"error": "No historical data found."}
-    except json.JSONDecodeError:
-        return {"error": "Could not parse historical data."}
+    # This will now fetch from MongoDB
+    if token_collection:
+        # Convert ObjectId to string for JSON serialization
+        return list(token_collection.find({}, {'_id': 0}))
+    return [] # Fallback if MongoDB not connected
