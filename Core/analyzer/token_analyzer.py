@@ -2,7 +2,7 @@ from Core.token_info import get_token_info
 from Core.checks.liquidity import check_liquidity
 from Core.checks.honeypot_check import simulate_trade
 from Core.checks.ownership_check import is_renounced
-from Core.logger import save_token_log 
+
 import json
 import os
 
@@ -53,6 +53,6 @@ class TokenAnalyzer:
         )
 
         # Log to file
-        save_token_log(result)
+
 
         return result
