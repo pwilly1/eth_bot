@@ -55,6 +55,18 @@ def run_blockchain_listener():
 
     while True:
         try:
+            if not web3.is_connected():
+                print("Web3 is not connected. Reconnecting...")
+                web3 = Web3(Web3.LegacyWebSocketProvider(wss))
+                factory_contract = web3.eth.contract(address=UNISWAP_FACTORY, abi=PAIR_CREATED_ABI)
+                event_filter = web3.eth.filter({
+                    "address": UNISWAP_FACTORY,
+                    "topics": [event_signature]
+                })
+                status_messages.append("Reconnected to Web3 provider.")
+                time.sleep(5) # Give some time for connection to establish
+                continue
+
             wallet_tracker_thread = None
             for log in event_filter.get_new_entries():
                 event = factory_contract.events.PairCreated().process_log(log)
@@ -98,6 +110,14 @@ def run_blockchain_listener():
             error_message = f"Error in blockchain listener: {e}"
             print(error_message)
             status_messages.append(error_message)
+            if "filter not found" in str(e):
+                print("Filter not found. Recreating filter...")
+                # Recreate the filter
+                event_filter = web3.eth.filter({
+                    "address": UNISWAP_FACTORY,
+                    "topics": [event_signature]
+                })
+                status_messages.append("Blockchain filter re-created.")
             time.sleep(5)
 
 @asynccontextmanager
