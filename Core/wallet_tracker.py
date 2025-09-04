@@ -4,7 +4,7 @@ import time
 from datetime import datetime
 import json
 from web3 import Web3
-from Core.gui.gui_manager import setup_gui, render_gui, update_token_log, update_status
+
 
 ERC20_ABI = [
     {
