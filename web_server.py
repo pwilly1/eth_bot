@@ -11,6 +11,8 @@ import asyncio
 from contextlib import asynccontextmanager
 from pymongo import MongoClient
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi import HTTPException
+
 
 # Data storage
 token_events = [] # This will eventually be replaced by MongoDB
@@ -120,6 +122,27 @@ def run_blockchain_listener():
                 # Save to MongoDB
                 if token_collection:
                     try:
+                        
+                        token_info = {
+                            "address": str(token0),
+                            "pair_address": str(pair),
+                            "liquidity_eth": float(result.get("liquidity_eth", 0)),
+                            "honeypot": bool(result.get("honeypot", False)),
+                            "ownership_renounced": bool(result.get("ownership_renounced", False)),
+                            
+                            "token0_info": {
+                                "name":  str(result.get("token0", {}).get("name", "")),
+                                "symbol":str(result.get("token0", {}).get("symbol", "")),
+                                "address":str(result.get("token0", {}).get("address", "")),
+                            },
+                            "token1_info": {
+                                "name":  str(result.get("token1", {}).get("name", "")),
+                                "symbol":str(result.get("token1", {}).get("symbol", "")),
+                                "address":str(result.get("token1", {}).get("address", "")),
+                            },
+                            "timestamp": int(time.time()),  # seconds
+                        }
+
                         token_collection.insert_one(token_info)
                         print(f"Token info saved to MongoDB: {token_info['address']}")
                     except Exception as mongo_e:
@@ -191,11 +214,40 @@ def get_status():
 
 @app.get("/api/token_events")
 def get_token_events():
-    # This will now fetch from MongoDB
-    if token_collection:
-        # Convert ObjectId to string for JSON serialization
-        return {"token_events": list(token_collection.find({}, {'_id': 0}))}
-    return {"token_events": []} # Fallback if MongoDB not connected
+    try:
+        if token_collection:
+            fields = {
+                "_id": 0,
+                "timestamp": 1,
+                "address": 1,
+                "liquidity_eth": 1,
+                "honeypot": 1,
+                "ownership_renounced": 1,
+            }
+            docs = list(token_collection.find({}, fields).sort("timestamp", -1).limit(200))
+            # defensive coercion (in case Mongo stored Decimals, etc.)
+            safe = []
+            for d in docs:
+                safe.append({
+                    "timestamp": int(d.get("timestamp", 0)),
+                    "address": str(d.get("address", "")),
+                    "liquidity_eth": float(d.get("liquidity_eth", 0.0)),
+                    "honeypot": bool(d.get("honeypot", False)),
+                    "ownership_renounced": bool(d.get("ownership_renounced", False)),
+                })
+            return {"token_events": safe}
+        # fallback to in-memory if Mongo is not configured
+        safe_mem = [{
+            "timestamp": int(e.get("timestamp", 0)),
+            "address": str(e.get("address", "")),
+            "liquidity_eth": float(e.get("liquidity_eth", 0.0)),
+            "honeypot": bool(e.get("honeypot", False)),
+            "ownership_renounced": bool(e.get("ownership_renounced", False)),
+        } for e in token_events]
+        return {"token_events": safe_mem}
+    except Exception as ex:
+        # surfaces a readable 500 to the client (and keeps logs useful)
+        raise HTTPException(status_code=500, detail=f"/api/token_events failed: {ex}")
 
 @app.get("/api/wallet_alerts")
 def get_wallet_alerts():
@@ -203,8 +255,44 @@ def get_wallet_alerts():
 
 @app.get("/api/historical_data")
 def get_historical_data():
-    # This will now fetch from MongoDB
-    if token_collection:
-        # Convert ObjectId to string for JSON serialization
-        return list(token_collection.find({}, {'_id': 0}))
-    return [] # Fallback if MongoDB not connected
+    try:
+        if token_collection:
+            # include names/symbols too
+            fields = {
+                "_id": 0,
+                "timestamp": 1,
+                "address": 1,
+                "liquidity_eth": 1,
+                "honeypot": 1,
+                "ownership_renounced": 1,
+                "token0_info": 1,
+                "token1_info": 1,
+            }
+            docs = list(token_collection.find({}, fields).sort("timestamp", -1).limit(500))
+        else:
+            docs = token_events
+
+        out = []
+        for e in docs:
+            t0 = e.get("token0_info") or e.get("token0") or {}
+            t1 = e.get("token1_info") or e.get("token1") or {}
+            out.append({
+                # convert to ms so your current React code displays correct times
+                "timestamp": int(e.get("timestamp", 0)) * 1000,
+                "liquidity_eth": float(e.get("liquidity_eth", 0.0)),
+                "honeypot": bool(e.get("honeypot", False)),
+                "ownership_renounced": bool(e.get("ownership_renounced", False)),
+                "token0": {
+                    "name":   str(t0.get("name", "")),
+                    "symbol": str(t0.get("symbol", "")),
+                    "address":str(t0.get("address", "")),
+                },
+                "token1": {
+                    "name":   str(t1.get("name", "")),
+                    "symbol": str(t1.get("symbol", "")),
+                    "address":str(t1.get("address", "")),
+                },
+            })
+        return out
+    except Exception as ex:
+        raise HTTPException(status_code=500, detail=f"/api/historical_data failed: {ex}")
