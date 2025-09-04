@@ -28,11 +28,18 @@ status_messages: List[str] = ["Starting..."]
 # ---------------------------
 def ensure_unique_index(collection):
     """
-    Ensure a unique PARTIAL index on (tx_hash, log_index) and clean legacy docs
-    that would collide ({null, null} or missing fields).
+    Clean legacy docs with missing or null keys and ensure a UNIQUE SPARSE index
+    on (tx_hash, log_index). Sparse means docs missing either field are not
+    indexed, so they don't collide. Also prevent inserting nulls in code.
     """
     try:
-        # Remove legacy rows that would block a unique index
+        # Drop any previous partial or wrong index if it exists
+        try:
+            collection.drop_index("uniq_txhash_logindex")
+        except Exception:
+            pass
+
+        # 1) Remove legacy rows that would collide 
         cleanup_filter = {
             "$or": [
                 {"tx_hash": {"$exists": False}},
@@ -48,19 +55,17 @@ def ensure_unique_index(collection):
         except Exception as e:
             print(f"Warning: cleanup failed (continuing): {e}")
 
-        # Partial unique index (applies only when both fields present & non-null)
+        #   Create UNIQUE SPARSE compound index
+        #    (Only documents that contain BOTH fields are indexed.
+        #     Missing fields are ignored; nulls would be indexed—so we cleaned them and we skip inserting nulls.)
         collection.create_index(
             [("tx_hash", ASCENDING), ("log_index", ASCENDING)],
             unique=True,
             name="uniq_txhash_logindex",
-            partialFilterExpression={
-                "tx_hash": {"$exists": True, "$ne": None},
-                "log_index": {"$exists": True, "$ne": None},
-            },
+            sparse=True,
         )
-        print("Unique partial index ensured on (tx_hash, log_index)")
+        print("Unique sparse index ensured on (tx_hash, log_index)")
     except PyMongoError as e:
-        # Do NOT disable Mongo on index errors; just log it.
         print(f"Index ensure warning: {e}")
 
 # ---------------------------
