@@ -131,6 +131,24 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(lifespan=lifespan)
 
+from fastapi.middleware.cors import CORSMiddleware
+
+app = FastAPI(lifespan=lifespan)
+
+# Add CORS middleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "https://eth-tracker-front.onrender.com",  # your frontend
+        "http://localhost:3000",                   # for local dev
+        "http://127.0.0.1:3000"
+    ],
+    allow_credentials=False,
+    allow_methods=["*"],  # allow all methods (GET, POST, etc.)
+    allow_headers=["*"],  # allow all headers
+)
+
+
 @app.get("/api/")
 def read_root():
     return {"status": "ok"}
