@@ -4,9 +4,10 @@ import time
 import threading
 import asyncio
 from contextlib import asynccontextmanager
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
+from datetime import datetime, timezone
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
 from pymongo import MongoClient
@@ -28,32 +29,24 @@ status_messages: List[str] = ["Starting..."]
 # ---------------------------
 # Mongo init (safe)
 # ---------------------------
-load_dotenv()  # load .env for MONGO_URI / WEB3_PROVIDER / PUBLIC_ADDRESS
+load_dotenv()
 MONGO_URI = os.getenv("MONGO_URI")
 
-client = None
-db = None
-token_collection = None
-
-#one doc per (tx_hash, log_index)
-try:
-    token_collection.create_index(
-        [("tx_hash", ASCENDING), ("log_index", ASCENDING)],
-        unique=True,
-        name="uniq_txhash_logindex",
-    )
-    print("Mongo index ensured: uniq_txhash_logindex")
-except Exception as e:
-    print(f"Index creation warning: {e}")
-
-
+client = db = token_collection = None
 if MONGO_URI:
     try:
         client = MongoClient(MONGO_URI, serverSelectionTimeoutMS=3000)
-        client.admin.command("ping")  # fail fast if unreachable
+        client.admin.command("ping")  # fail fast
         db = client["eth_bot_db"]
         token_collection = db["token_events"]
-        print("Mongo connected")
+
+        # Ensure idempotency: one doc per (tx_hash, log_index)
+        token_collection.create_index(
+            [("tx_hash", ASCENDING), ("log_index", ASCENDING)],
+            unique=True,
+            name="uniq_txhash_logindex",
+        )
+        print("Mongo connected + index ensured")
     except Exception as e:
         msg = f"Mongo unavailable: {e}"
         print(msg)
@@ -124,18 +117,20 @@ def run_blockchain_listener():
                 analyzer = TokenAnalyzer(web3, token0, token1, pair, config["UNISWAP_ROUTER"], PUBLIC_ADDRESS)
                 result = analyzer.analyze()
 
-                # ---- NEW: stable identifiers for idempotency
+                # stable identifiers for idempotency
                 tx_hash = log["transactionHash"].hex()
                 log_index = int(log["logIndex"])
                 block_number = int(log["blockNumber"])
 
-                # JSON-safe event doc
+                # pick the non-WETH token for the 'address' field
+                target_token = analyzer.get_target_token()  # uses WETH logic inside the analyzer
+
                 token_info = {
                     "tx_hash": tx_hash,
                     "log_index": log_index,
                     "block_number": block_number,
 
-                    "address": str(token0),
+                    "address": str(target_token),             # <-- changed from token0
                     "pair_address": str(pair),
                     "liquidity_eth": float(result.get("liquidity_eth", 0.0)),
                     "honeypot": bool(result.get("honeypot", False)),
@@ -153,10 +148,9 @@ def run_blockchain_listener():
                     "timestamp": int(time.time()),
                 }
 
+                # upsert using the unique key (no duplicates even with multiple workers)
                 inserted = False
-
                 if token_collection is not None:
-                    # ---- NEW: UPSERT using the unique key; only writes once globally
                     try:
                         res = token_collection.update_one(
                             {"tx_hash": tx_hash, "log_index": log_index},
@@ -164,17 +158,11 @@ def run_blockchain_listener():
                             upsert=True,
                         )
                         inserted = res.upserted_id is not None
-                        if inserted:
-                            print(f"Inserted new token event {tx_hash}:{log_index}")
-                        else:
-                            print(f"Duplicate token event skipped {tx_hash}:{log_index}")
-                    except DuplicateKeyError:
-                        inserted = False
-                        print(f"DuplicateKeyError: {tx_hash}:{log_index} already exists")
+                        print(("Inserted" if inserted else "Duplicate skipped"), f"{tx_hash}:{log_index}")
                     except Exception as mongo_e:
                         print(f"Error saving to MongoDB: {mongo_e}")
                 else:
-                    # ---- NEW: in-memory dedupe fallback (no Mongo)
+                    # in-memory dedupe fallback
                     global seen_keys
                     try:
                         seen_keys
@@ -184,12 +172,10 @@ def run_blockchain_listener():
                     if key not in seen_keys:
                         seen_keys.add(key)
                         inserted = True
-                    else:
-                        inserted = False
 
-                
                 if inserted and token_collection is None:
                     token_events.append(token_info)
+
 
 
             if wallet_tracker_thread and not wallet_tracker_thread.is_alive():
@@ -258,13 +244,36 @@ def get_status():
     return {"status": status_messages[-1] if status_messages else "No status yet."}
 
 @app.get("/api/token_events")
-def get_token_events():
+def get_token_events(
+    q: Optional[str] = Query(None, description="search token address/name/symbol"),
+    honeypot: Optional[bool] = Query(None, description="filter honeypot true/false"),
+    limit: int = Query(200, description="max results"),
+):
     """
     Return only plain JSON types the UI expects; never 500 on bad records.
     """
     try:
         docs: List[Dict[str, Any]] = []
+
+        # compute start of today (UTC) to only return today's events
+        start_of_day = int(datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0).timestamp())
+
         if token_collection is not None:
+            query: Dict[str, Any] = {"timestamp": {"$gte": start_of_day}}
+            if honeypot is not None:
+                query["honeypot"] = bool(honeypot)
+            if q:
+                regex = {"$regex": q, "$options": "i"}
+                query["$or"] = [
+                    {"address": regex},
+                    {"token0_info.address": regex},
+                    {"token1_info.address": regex},
+                    {"token0_info.name": regex},
+                    {"token1_info.name": regex},
+                    {"token0_info.symbol": regex},
+                    {"token1_info.symbol": regex},
+                ]
+
             fields = {
                 "_id": 0,
                 "timestamp": 1,
@@ -272,19 +281,47 @@ def get_token_events():
                 "liquidity_eth": 1,
                 "honeypot": 1,
                 "ownership_renounced": 1,
+                "token0_info": 1,
+                "token1_info": 1,
             }
-            docs = list(token_collection.find({}, fields).sort("timestamp", -1).limit(200))
+            docs = list(token_collection.find(query, fields).sort("timestamp", -1).limit(limit))
         else:
-            docs = token_events
+            # in-memory fallback
+            for e in token_events:
+                if int(e.get("timestamp", 0)) < start_of_day:
+                    continue
+                if honeypot is not None and bool(e.get("honeypot", False)) != bool(honeypot):
+                    continue
+                if q:
+                    ql = q.lower()
+                    found = False
+                    for val in [
+                        str(e.get("address", "")),
+                        str((e.get("token0_info") or {}).get("address", "")),
+                        str((e.get("token1_info") or {}).get("address", "")),
+                        str((e.get("token0_info") or {}).get("name", "")),
+                        str((e.get("token1_info") or {}).get("name", "")),
+                        str((e.get("token0_info") or {}).get("symbol", "")),
+                        str((e.get("token1_info") or {}).get("symbol", "")),
+                    ]:
+                        if ql in val.lower():
+                            found = True
+                            break
+                    if not found:
+                        continue
+                docs.append(e)
+            docs = sorted(docs, key=lambda x: int(x.get("timestamp", 0)), reverse=True)[:limit]
 
         safe = []
         for d in docs:
             safe.append({
-                "timestamp": int(d.get("timestamp", 0)),                 # seconds
+                "timestamp": int(d.get("timestamp", 0)) * 1000,  # ms for UI
                 "address": str(d.get("address", "")),
                 "liquidity_eth": float(d.get("liquidity_eth", 0.0)),
                 "honeypot": bool(d.get("honeypot", False)),
                 "ownership_renounced": bool(d.get("ownership_renounced", False)),
+                "token0": d.get("token0_info") or {},
+                "token1": d.get("token1_info") or {},
             })
         return {"token_events": safe}
 
@@ -307,7 +344,11 @@ def get_wallet_alerts():
     return {"wallet_alerts": wallet_alerts}
 
 @app.get("/api/historical_data")
-def get_historical_data():
+def get_historical_data(
+    q: Optional[str] = Query(None, description="search token address/name/symbol"),
+    honeypot: Optional[bool] = Query(None, description="filter honeypot true/false"),
+    limit: int = Query(500, description="max results"),
+):
     """
     Return an array; normalize token0/token1 keys and convert timestamp to ms
     so the current React code renders correctly.
@@ -315,6 +356,21 @@ def get_historical_data():
     try:
         docs: List[Dict[str, Any]] = []
         if token_collection is not None:
+            query: Dict[str, Any] = {}
+            if honeypot is not None:
+                query["honeypot"] = bool(honeypot)
+            if q:
+                regex = {"$regex": q, "$options": "i"}
+                query["$or"] = [
+                    {"address": regex},
+                    {"token0_info.address": regex},
+                    {"token1_info.address": regex},
+                    {"token0_info.name": regex},
+                    {"token1_info.name": regex},
+                    {"token0_info.symbol": regex},
+                    {"token1_info.symbol": regex},
+                ]
+
             fields = {
                 "_id": 0,
                 "timestamp": 1,
@@ -325,9 +381,31 @@ def get_historical_data():
                 "token1_info": 1,
                 "address": 1,
             }
-            docs = list(token_collection.find({}, fields).sort("timestamp", -1).limit(500))
+            docs = list(token_collection.find(query, fields).sort("timestamp", -1).limit(limit))
         else:
-            docs = token_events
+            # in-memory fallback
+            for e in token_events:
+                if honeypot is not None and bool(e.get("honeypot", False)) != bool(honeypot):
+                    continue
+                if q:
+                    ql = q.lower()
+                    found = False
+                    for val in [
+                        str(e.get("address", "")),
+                        str((e.get("token0_info") or {}).get("address", "")),
+                        str((e.get("token1_info") or {}).get("address", "")),
+                        str((e.get("token0_info") or {}).get("name", "")),
+                        str((e.get("token1_info") or {}).get("name", "")),
+                        str((e.get("token0_info") or {}).get("symbol", "")),
+                        str((e.get("token1_info") or {}).get("symbol", "")),
+                    ]:
+                        if ql in val.lower():
+                            found = True
+                            break
+                    if not found:
+                        continue
+                docs.append(e)
+            docs = sorted(docs, key=lambda x: int(x.get("timestamp", 0)), reverse=True)[:limit]
 
         out = []
         for e in docs:
