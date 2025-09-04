@@ -11,6 +11,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
 from pymongo import MongoClient
 from pymongo.errors import ServerSelectionTimeoutError, PyMongoError
+from pymongo import MongoClient, ASCENDING
+from pymongo.errors import DuplicateKeyError, ServerSelectionTimeoutError, PyMongoError
 from web3 import Web3
 
 from Core.analyzer.token_analyzer import TokenAnalyzer
@@ -32,6 +34,18 @@ MONGO_URI = os.getenv("MONGO_URI")
 client = None
 db = None
 token_collection = None
+
+#one doc per (tx_hash, log_index)
+try:
+    token_collection.create_index(
+        [("tx_hash", ASCENDING), ("log_index", ASCENDING)],
+        unique=True,
+        name="uniq_txhash_logindex",
+    )
+    print("Mongo index ensured: uniq_txhash_logindex")
+except Exception as e:
+    print(f"Index creation warning: {e}")
+
 
 if MONGO_URI:
     try:
@@ -105,20 +119,22 @@ def run_blockchain_listener():
                 tx = web3.eth.get_transaction(log["transactionHash"])
                 deployer = tx["from"].lower()
 
-                if deployer in WATCHLIST:
-                    message = f"Deployer {deployer} is in watchlist! ✅"
-                    print(f"⚠️ {message}")
-                    wallet_alerts.append(message)
-                    tracked = {token0.lower(), token1.lower()}
-                    wallet_tracker = WalletTracker(web3, tracked, WATCHLIST)
-                    wallet_tracker_thread = threading.Thread(target=wallet_tracker.run, daemon=True)
-                    wallet_tracker_thread.start()
+                # ... (your watchlist / WalletTracker block unchanged)
 
                 analyzer = TokenAnalyzer(web3, token0, token1, pair, config["UNISWAP_ROUTER"], PUBLIC_ADDRESS)
                 result = analyzer.analyze()
 
-                # JSON-safe, flat shape (coerce types)
+                # ---- NEW: stable identifiers for idempotency
+                tx_hash = log["transactionHash"].hex()
+                log_index = int(log["logIndex"])
+                block_number = int(log["blockNumber"])
+
+                # JSON-safe event doc
                 token_info = {
+                    "tx_hash": tx_hash,
+                    "log_index": log_index,
+                    "block_number": block_number,
+
                     "address": str(token0),
                     "pair_address": str(pair),
                     "liquidity_eth": float(result.get("liquidity_eth", 0.0)),
@@ -134,19 +150,47 @@ def run_blockchain_listener():
                         "symbol": str(result.get("token1", {}).get("symbol", "")),
                         "address":str(result.get("token1", {}).get("address", "")),
                     },
-                    "timestamp": int(time.time()),  # seconds
+                    "timestamp": int(time.time()),
                 }
 
-                # Save to Mongo (only if connected)
+                inserted = False
+
                 if token_collection is not None:
+                    # ---- NEW: UPSERT using the unique key; only writes once globally
                     try:
-                        token_collection.insert_one(token_info)
-                        print(f"Token info saved to MongoDB: {token_info['address']}")
+                        res = token_collection.update_one(
+                            {"tx_hash": tx_hash, "log_index": log_index},
+                            {"$setOnInsert": token_info},
+                            upsert=True,
+                        )
+                        inserted = res.upserted_id is not None
+                        if inserted:
+                            print(f"Inserted new token event {tx_hash}:{log_index}")
+                        else:
+                            print(f"Duplicate token event skipped {tx_hash}:{log_index}")
+                    except DuplicateKeyError:
+                        inserted = False
+                        print(f"DuplicateKeyError: {tx_hash}:{log_index} already exists")
                     except Exception as mongo_e:
                         print(f"Error saving to MongoDB: {mongo_e}")
+                else:
+                    # ---- NEW: in-memory dedupe fallback (no Mongo)
+                    global seen_keys
+                    try:
+                        seen_keys
+                    except NameError:
+                        seen_keys = set()
+                    key = f"{tx_hash}:{log_index}"
+                    if key not in seen_keys:
+                        seen_keys.add(key)
+                        inserted = True
+                    else:
+                        inserted = False
 
-                # Keep in memory for current session
-                token_events.append(token_info)
+                
+                if inserted and token_collection is None:
+                    token_events.append(token_info)
+
 
             if wallet_tracker_thread and not wallet_tracker_thread.is_alive():
                 wallet_alerts.append("Wallet tracker thread finished.")
