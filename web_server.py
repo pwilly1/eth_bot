@@ -2,7 +2,6 @@ import json
 import os
 import time
 import threading
-import asyncio
 from contextlib import asynccontextmanager
 from typing import List, Dict, Any, Optional
 from datetime import datetime, timezone
@@ -10,8 +9,6 @@ from datetime import datetime, timezone
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
-from pymongo import MongoClient
-from pymongo.errors import ServerSelectionTimeoutError, PyMongoError
 from pymongo import MongoClient, ASCENDING
 from pymongo.errors import DuplicateKeyError, ServerSelectionTimeoutError, PyMongoError
 from web3 import Web3
@@ -27,6 +24,46 @@ wallet_alerts: List[str] = []
 status_messages: List[str] = ["Starting..."]
 
 # ---------------------------
+# Helpers
+# ---------------------------
+def ensure_unique_index(collection):
+    """
+    Ensure a unique PARTIAL index on (tx_hash, log_index) and clean legacy docs
+    that would collide ({null, null} or missing fields).
+    """
+    try:
+        # Remove legacy rows that would block a unique index
+        cleanup_filter = {
+            "$or": [
+                {"tx_hash": {"$exists": False}},
+                {"log_index": {"$exists": False}},
+                {"tx_hash": None},
+                {"log_index": None},
+            ]
+        }
+        try:
+            removed = collection.delete_many(cleanup_filter).deleted_count
+            if removed:
+                print(f"Cleaned {removed} legacy docs without tx_hash/log_index")
+        except Exception as e:
+            print(f"Warning: cleanup failed (continuing): {e}")
+
+        # Partial unique index (applies only when both fields present & non-null)
+        collection.create_index(
+            [("tx_hash", ASCENDING), ("log_index", ASCENDING)],
+            unique=True,
+            name="uniq_txhash_logindex",
+            partialFilterExpression={
+                "tx_hash": {"$exists": True, "$ne": None},
+                "log_index": {"$exists": True, "$ne": None},
+            },
+        )
+        print("Unique partial index ensured on (tx_hash, log_index)")
+    except PyMongoError as e:
+        # Do NOT disable Mongo on index errors; just log it.
+        print(f"Index ensure warning: {e}")
+
+# ---------------------------
 # Mongo init (safe)
 # ---------------------------
 load_dotenv()
@@ -36,22 +73,18 @@ client = db = token_collection = None
 if MONGO_URI:
     try:
         client = MongoClient(MONGO_URI, serverSelectionTimeoutMS=3000)
-        client.admin.command("ping")  # fail fast
+        client.admin.command("ping")  # fail fast if unreachable
         db = client["eth_bot_db"]
         token_collection = db["token_events"]
+        print("Mongo connected")
 
-        # Ensure idempotency: one doc per (tx_hash, log_index)
-        token_collection.create_index(
-            [("tx_hash", ASCENDING), ("log_index", ASCENDING)],
-            unique=True,
-            name="uniq_txhash_logindex",
-        )
-        print("Mongo connected + index ensured")
+        # Ensure index (do not crash if it fails)
+        ensure_unique_index(token_collection)
     except Exception as e:
-        msg = f"Mongo unavailable: {e}"
+        msg = f"Mongo connected but index setup hit an issue: {e}"
         print(msg)
         status_messages.append(msg)
-        client = db = token_collection = None
+        # keep token_collection if connection succeeded
 else:
     print("MONGO_URI not set; running without Mongo")
 
@@ -112,25 +145,60 @@ def run_blockchain_listener():
                 tx = web3.eth.get_transaction(log["transactionHash"])
                 deployer = tx["from"].lower()
 
-                # ... (your watchlist / WalletTracker block unchanged)
+                # Watchlist alert / wallet tracker (unchanged)
+                if deployer in WATCHLIST:
+                    message = f"Deployer {deployer} is in watchlist! ✅"
+                    print(f"⚠️ {message}")
+                    wallet_alerts.append(message)
+                    tracked = {token0.lower(), token1.lower()}
+                    wallet_tracker = WalletTracker(web3, tracked, WATCHLIST)
+                    wallet_tracker_thread = threading.Thread(target=wallet_tracker.run, daemon=True)
+                    wallet_tracker_thread.start()
 
                 analyzer = TokenAnalyzer(web3, token0, token1, pair, config["UNISWAP_ROUTER"], PUBLIC_ADDRESS)
                 result = analyzer.analyze()
 
-                # stable identifiers for idempotency
-                tx_hash = log["transactionHash"].hex()
-                log_index = int(log["logIndex"])
-                block_number = int(log["blockNumber"])
+                # ---- Robust identifiers for idempotency
+                raw_txh = log.get("transactionHash")
+                raw_lix = log.get("logIndex")
+                raw_blk = log.get("blockNumber")
+
+                try:
+                    tx_hash = raw_txh.hex() if hasattr(raw_txh, "hex") else str(raw_txh)
+                except Exception:
+                    tx_hash = None
+
+                try:
+                    log_index = int(raw_lix) if raw_lix is not None else None
+                except Exception:
+                    log_index = None
+
+                try:
+                    block_number = int(raw_blk) if raw_blk is not None else None
+                except Exception:
+                    block_number = None
+
+                # If we can't identify uniquely, skip persisting
+                if not tx_hash or log_index is None:
+                    print("Skipping event: missing tx_hash/log_index")
+                    continue
 
                 # pick the non-WETH token for the 'address' field
-                target_token = analyzer.get_target_token()  # uses WETH logic inside the analyzer
+                try:
+                    target_token = analyzer.get_target_token()  # analyzer helper
+                except Exception:
+                    # fallback: pick non-WETH by symbol in result
+                    t0 = result.get("token0", {}) or {}
+                    t1 = result.get("token1", {}) or {}
+                    target_token = (t1.get("address")
+                                    if (t0.get("symbol", "") or "").upper() == "WETH"
+                                    else t0.get("address"))
 
                 token_info = {
                     "tx_hash": tx_hash,
                     "log_index": log_index,
                     "block_number": block_number,
-
-                    "address": str(target_token),             # <-- changed from token0
+                    "address": str(target_token or token0),
                     "pair_address": str(pair),
                     "liquidity_eth": float(result.get("liquidity_eth", 0.0)),
                     "honeypot": bool(result.get("honeypot", False)),
@@ -148,7 +216,7 @@ def run_blockchain_listener():
                     "timestamp": int(time.time()),
                 }
 
-                # upsert using the unique key (no duplicates even with multiple workers)
+                # ---- UPSERT using the unique key; only writes once globally
                 inserted = False
                 if token_collection is not None:
                     try:
@@ -159,10 +227,13 @@ def run_blockchain_listener():
                         )
                         inserted = res.upserted_id is not None
                         print(("Inserted" if inserted else "Duplicate skipped"), f"{tx_hash}:{log_index}")
+                    except DuplicateKeyError:
+                        inserted = False
+                        print(f"DuplicateKeyError: {tx_hash}:{log_index} already exists")
                     except Exception as mongo_e:
                         print(f"Error saving to MongoDB: {mongo_e}")
                 else:
-                    # in-memory dedupe fallback
+                    # in-memory dedupe fallback (no Mongo)
                     global seen_keys
                     try:
                         seen_keys
@@ -175,8 +246,6 @@ def run_blockchain_listener():
 
                 if inserted and token_collection is None:
                     token_events.append(token_info)
-
-
 
             if wallet_tracker_thread and not wallet_tracker_thread.is_alive():
                 wallet_alerts.append("Wallet tracker thread finished.")
@@ -240,7 +309,6 @@ def read_watchlist():
 
 @app.get("/api/status")
 def get_status():
-    # last status message if any
     return {"status": status_messages[-1] if status_messages else "No status yet."}
 
 @app.get("/api/token_events")
@@ -251,11 +319,12 @@ def get_token_events(
 ):
     """
     Return only plain JSON types the UI expects; never 500 on bad records.
+    Timestamps are returned in **ms** for your UI.
     """
     try:
         docs: List[Dict[str, Any]] = []
 
-        # compute start of today (UTC) to only return today's events
+        # start of today (UTC): only today's events
         start_of_day = int(datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0).timestamp())
 
         if token_collection is not None:
@@ -326,15 +395,16 @@ def get_token_events(
         return {"token_events": safe}
 
     except (ServerSelectionTimeoutError, PyMongoError) as e:
-        # Fall back to in-memory; do not crash
         status_messages.append(f"Mongo error: {e}")
         safe_mem = [{
-            "timestamp": int(e.get("timestamp", 0)),
-            "address": str(e.get("address", "")),
-            "liquidity_eth": float(e.get("liquidity_eth", 0.0)),
-            "honeypot": bool(e.get("honeypot", False)),
-            "ownership_renounced": bool(e.get("ownership_renounced", False)),
-        } for e in token_events]
+            "timestamp": int(ev.get("timestamp", 0)) * 1000,
+            "address": str(ev.get("address", "")),
+            "liquidity_eth": float(ev.get("liquidity_eth", 0.0)),
+            "honeypot": bool(ev.get("honeypot", False)),
+            "ownership_renounced": bool(ev.get("ownership_renounced", False)),
+            "token0": ev.get("token0_info") or {},
+            "token1": ev.get("token1_info") or {},
+        } for ev in token_events]
         return {"token_events": safe_mem}
     except Exception as ex:
         raise HTTPException(status_code=500, detail=f"/api/token_events failed: {ex}")
@@ -434,3 +504,38 @@ def get_historical_data(
         return []
     except Exception as ex:
         raise HTTPException(status_code=500, detail=f"/api/historical_data failed: {ex}")
+
+
+
+@app.get("/api/token/{address}")
+def get_token_detail(address: str):
+    """Return detailed info for a single token address (normalize and return helpful fields)."""
+    try:
+        addr = address.lower()
+        if token_collection is not None:
+            doc = token_collection.find_one({"address": {"$regex": f"^{addr}$", "$options": "i"}}, {"_id": 0})
+        else:
+            doc = next((e for e in token_events if str(e.get("address", "")).lower() == addr), None)
+
+        if not doc:
+            raise HTTPException(status_code=404, detail="Token not found")
+
+        # Normalize token0/token1
+        t0 = doc.get("token0_info") or doc.get("token0") or {}
+        t1 = doc.get("token1_info") or doc.get("token1") or {}
+
+        return {
+            "timestamp": int(doc.get("timestamp", 0)) * 1000,
+            "address": str(doc.get("address", "")),
+            "pair_address": str(doc.get("pair_address", "")),
+            "liquidity_eth": float(doc.get("liquidity_eth", 0.0)),
+            "honeypot": bool(doc.get("honeypot", False)),
+            "ownership_renounced": bool(doc.get("ownership_renounced", False)),
+            "token0": {"name": str(t0.get("name", "")), "symbol": str(t0.get("symbol", "")), "address": str(t0.get("address", ""))},
+            "token1": {"name": str(t1.get("name", "")), "symbol": str(t1.get("symbol", "")), "address": str(t1.get("address", ""))},
+            "raw": doc,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"/api/token/{address} failed: {e}")
