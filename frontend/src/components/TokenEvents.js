@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import {
-  Table, TableBody, TableCell, TableContainer, TableHead, TableRow, Paper, TextField, Button, Dialog, DialogTitle, DialogContent, DialogActions, FormControlLabel, Checkbox
+  Table, TableBody, TableCell, TableContainer, TableHead, TableRow, Paper, TextField, Button, Dialog, DialogTitle, DialogContent, DialogActions, FormControlLabel, Checkbox, Typography
 } from '@mui/material';
 import TokenDetailModal from './TokenDetailModal';
 
@@ -39,7 +39,8 @@ function TokenEvents() {
         <Button variant='outlined' onClick={() => setFiltersOpen(true)}>Filters</Button>
         <Button onClick={() => { setQ(''); setMinLiquidity(''); setOwnership(null); }}>Reset</Button>
       </div>
-      <TableContainer>
+  <Typography variant="h6" gutterBottom>Today's Activity</Typography>
+  <TableContainer>
         <Table>
           <TableHead>
             <TableRow>
