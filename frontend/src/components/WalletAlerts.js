@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { List, ListItem, ListItemText, Paper } from '@mui/material';
+import { List, ListItem, ListItemText, Paper, Typography, Box } from '@mui/material';
 
 function WalletAlerts() {
   const [walletAlerts, setWalletAlerts] = useState([]);
@@ -9,7 +9,7 @@ function WalletAlerts() {
       try {
         const walletAlertsRes = await fetch('/api/wallet_alerts');
         const walletAlertsData = await walletAlertsRes.json();
-        setWalletAlerts(walletAlertsData.wallet_alerts);
+        setWalletAlerts(walletAlertsData.wallet_alerts || []);
       } catch (error) {
         console.error('Error fetching wallet alerts:', error);
       }
@@ -22,14 +22,21 @@ function WalletAlerts() {
   }, []);
 
   return (
-    <Paper elevation={3} style={{ padding: '20px', margin: '20px 0' }}>
-      <List>
-        {walletAlerts.map((alert, index) => (
-          <ListItem key={index}>
-            <ListItemText primary={alert} />
-          </ListItem>
-        ))}
-      </List>
+    <Paper elevation={3} sx={{ p: 3, my: 3 }}>
+      <Box>
+        <Typography variant="h6" gutterBottom>Wallet Alerts</Typography>
+        {walletAlerts.length === 0 ? (
+          <Typography>No wallet alerts yet.</Typography>
+        ) : (
+          <List>
+            {walletAlerts.map((alert, index) => (
+              <ListItem key={index}>
+                <ListItemText primary={alert} />
+              </ListItem>
+            ))}
+          </List>
+        )}
+      </Box>
     </Paper>
   );
 }

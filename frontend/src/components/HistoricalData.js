@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import {
-  Table, TableBody, TableCell, TableContainer, TableHead, TableRow, Paper, TextField, Button
+  Table, TableBody, TableCell, TableContainer, TableHead, TableRow, Paper, TextField, Button, ButtonGroup, Typography, Box, Chip
 } from '@mui/material';
 import TokenDetailModal from './TokenDetailModal';
 import { Dialog, DialogTitle, DialogContent, DialogActions, FormControlLabel, Checkbox } from '@mui/material';
@@ -11,6 +11,12 @@ function HistoricalData() {
   const [filtersOpen, setFiltersOpen] = useState(false);
   const [minLiquidity, setMinLiquidity] = useState('');
   const [ownership, setOwnership] = useState(null);
+  const [timeline, setTimeline] = useState('today');
+  const [startMs, setStartMs] = useState(null);
+  const [endMs, setEndMs] = useState(null);
+  const [customOpen, setCustomOpen] = useState(false);
+  const [customStart, setCustomStart] = useState('');
+  const [customEnd, setCustomEnd] = useState('');
   const [selected, setSelected] = useState(null);
 
   const fetchData = async () => {
@@ -19,6 +25,8 @@ function HistoricalData() {
       if (q) params.set('q', q);
   if (minLiquidity) params.set('min_liquidity', minLiquidity);
   if (ownership !== null) params.set('ownership', ownership ? 'true' : 'false');
+  if (startMs) params.set('start_ms', String(startMs));
+  if (endMs) params.set('end_ms', String(endMs));
       const res = await fetch('/api/historical_data?' + params.toString());
       const data = await res.json();
       setHistoricalData(data || []);
@@ -31,15 +39,47 @@ function HistoricalData() {
     const interval = setInterval(fetchData, 5000);
     fetchData();
     return () => clearInterval(interval);
-  }, [q, minLiquidity, ownership]);
+  }, [q, minLiquidity, ownership, startMs, endMs]);
+
+  // timeline helper
+  const applyTimeline = (tl) => {
+    setTimeline(tl);
+    const now = Date.now();
+    let s = null;
+    let e = now;
+    if (tl === 'today') {
+      const d = new Date();
+      d.setHours(0,0,0,0);
+      s = d.getTime();
+    } else if (tl === '24h') {
+      s = now - 24 * 60 * 60 * 1000;
+    } else if (tl === '7d') {
+      s = now - 7 * 24 * 60 * 60 * 1000;
+    } else if (tl === '30d') {
+      s = now - 30 * 24 * 60 * 60 * 1000;
+    } else if (tl === 'custom') {
+      // open dialog for custom range
+      setCustomOpen(true);
+      return;
+    }
+    setStartMs(s);
+    setEndMs(e);
+  };
 
   return (
-    <Paper elevation={3} style={{ padding: '20px', margin: '20px 0' }}>
-      <div style={{ display: 'flex', gap: '10px', marginBottom: '10px' }}>
-        <TextField label="Search" value={q} onChange={(e) => setQ(e.target.value)} />
+    <Paper elevation={3} sx={{ p: 3, my: 3 }}>
+      <Box sx={{ display: 'flex', gap: 2, mb: 2, alignItems: 'center' }}>
+        <TextField label="Search" value={q} onChange={(e) => setQ(e.target.value)} size="small" sx={{ flex: 1 }} />
+        <ButtonGroup variant="outlined">
+          <Button onClick={() => applyTimeline('today')} color={timeline==='today' ? 'primary' : 'inherit'}>Today</Button>
+          <Button onClick={() => applyTimeline('24h')} color={timeline==='24h' ? 'primary' : 'inherit'}>24h</Button>
+          <Button onClick={() => applyTimeline('7d')} color={timeline==='7d' ? 'primary' : 'inherit'}>7d</Button>
+          <Button onClick={() => applyTimeline('30d')} color={timeline==='30d' ? 'primary' : 'inherit'}>30d</Button>
+          <Button onClick={() => applyTimeline('custom')} color={timeline==='custom' ? 'primary' : 'inherit'}>Custom</Button>
+        </ButtonGroup>
         <Button variant='outlined' onClick={() => setFiltersOpen(true)}>Filters</Button>
-        <Button onClick={() => { setQ(''); setMinLiquidity(''); setOwnership(null); }}>Reset</Button>
-      </div>
+        <Button onClick={() => { setQ(''); setMinLiquidity(''); setOwnership(null); setStartMs(null); setEndMs(null); setTimeline('today'); }}>Reset</Button>
+      </Box>
       <TableContainer>
         <Table>
           <TableHead>
@@ -53,19 +93,27 @@ function HistoricalData() {
             </TableRow>
           </TableHead>
           <TableBody>
-            {historicalData.map((entry, index) => {
-              const main_token = (entry.token0 && entry.token0.symbol === 'WETH') ? entry.token1 : entry.token0;
-              return (
-                <TableRow key={index} hover style={{ cursor: 'pointer' }} onClick={() => setSelected(entry)}>
-                  <TableCell>{new Date(entry.timestamp).toLocaleString()}</TableCell>
-                  <TableCell>{main_token?.name || 'Unknown'} ({main_token?.symbol || 'N/A'})</TableCell>
-                  <TableCell>{main_token?.address}</TableCell>
-                  <TableCell>{Number(entry.liquidity_eth).toFixed(4)}</TableCell>
-                  <TableCell>{entry.honeypot ? 'Yes' : 'No'}</TableCell>
-                  <TableCell>{entry.ownership_renounced ? 'Yes' : 'No'}</TableCell>
-                </TableRow>
-              );
-            })}
+            {historicalData.length === 0 ? (
+              <TableRow>
+                <TableCell colSpan={6}>
+                  <Typography>No historical data for the selected range.</Typography>
+                </TableCell>
+              </TableRow>
+            ) : (
+              historicalData.map((entry, index) => {
+                const main_token = (entry.token0 && (entry.token0.symbol || '').toUpperCase() === 'WETH') ? entry.token1 : entry.token0;
+                return (
+                  <TableRow key={index} hover sx={{ cursor: 'pointer' }} onClick={() => setSelected(entry)}>
+                    <TableCell>{new Date(entry.timestamp).toLocaleString()}</TableCell>
+                    <TableCell>{main_token?.name || 'Unknown'} ({main_token?.symbol || 'N/A'})</TableCell>
+                    <TableCell>{main_token?.address}</TableCell>
+                    <TableCell><Chip label={`${Number(entry.liquidity_eth).toFixed(4)} ETH`} size="small" /></TableCell>
+                    <TableCell>{entry.honeypot ? 'Yes' : 'No'}</TableCell>
+                    <TableCell>{entry.ownership_renounced ? 'Yes' : 'No'}</TableCell>
+                  </TableRow>
+                );
+              })
+            )}
           </TableBody>
         </Table>
       </TableContainer>
@@ -82,6 +130,26 @@ function HistoricalData() {
         <DialogActions>
           <Button onClick={() => setFiltersOpen(false)}>Close</Button>
           <Button onClick={() => { setFiltersOpen(false); fetchData(); }}>Apply</Button>
+        </DialogActions>
+      </Dialog>
+
+      <Dialog open={customOpen} onClose={() => setCustomOpen(false)}>
+        <DialogTitle>Custom Range</DialogTitle>
+        <DialogContent>
+          <TextField label="Start Time" type="datetime-local" value={customStart} onChange={(e) => setCustomStart(e.target.value)} InputLabelProps={{ shrink: true }} fullWidth />
+          <TextField label="End Time" type="datetime-local" value={customEnd} onChange={(e) => setCustomEnd(e.target.value)} InputLabelProps={{ shrink: true }} fullWidth style={{ marginTop: 10 }} />
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setCustomOpen(false)}>Cancel</Button>
+          <Button onClick={() => {
+            // convert to ms
+            const s = customStart ? new Date(customStart).getTime() : null;
+            const e = customEnd ? new Date(customEnd).getTime() : Date.now();
+            setStartMs(s);
+            setEndMs(e);
+            setCustomOpen(false);
+            setTimeline('custom');
+          }}>Apply</Button>
         </DialogActions>
       </Dialog>
     </Paper>

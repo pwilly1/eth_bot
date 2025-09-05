@@ -1,11 +1,12 @@
 import React, { useState, useEffect } from 'react';
 import {
-  AppBar, Toolbar, Typography, Container, Tabs, Tab, Box, CssBaseline
+  AppBar, Toolbar, Typography, Container, Tabs, Tab, Box, CssBaseline, Chip
 } from '@mui/material';
 import { createTheme, ThemeProvider } from '@mui/material/styles';
 import TokenEvents from './components/TokenEvents';
 import WalletAlerts from './components/WalletAlerts';
 import HistoricalData from './components/HistoricalData';
+import WatchlistManager from './components/WatchlistManager';
 
 const darkTheme = createTheme({
   palette: {
@@ -77,18 +78,19 @@ function App() {
           <Typography variant="h6" component="div" sx={{ flexGrow: 1 }}>
             ETH Bot
           </Typography>
-          <Typography variant="h6">Status: {status}</Typography>
+          <Chip label={`Status: ${status}`} color="secondary" size="small" />
         </Toolbar>
       </AppBar>
-      <Container>
+  <Container maxWidth="lg" sx={{ py: 4 }}>
         <Box sx={{ borderBottom: 1, borderColor: 'divider' }}>
-          <Tabs value={tabValue} onChange={handleTabChange} aria-label="basic tabs example">
+          <Tabs centered value={tabValue} onChange={handleTabChange} aria-label="basic tabs example">
             <Tab label="Token Events" />
             <Tab label="Wallet Alerts" />
             <Tab label="Historical Data" />
+            <Tab label="Watchlist" />
           </Tabs>
         </Box>
-        <TabPanel value={tabValue} index={0}>
+  <TabPanel value={tabValue} index={0}>
           <TokenEvents />
         </TabPanel>
         <TabPanel value={tabValue} index={1}>
@@ -97,6 +99,9 @@ function App() {
         <TabPanel value={tabValue} index={2}>
           <HistoricalData />
         </TabPanel>
+          <TabPanel value={tabValue} index={3}>
+            <WatchlistManager />
+          </TabPanel>
       </Container>
     </ThemeProvider>
   );

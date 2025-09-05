@@ -23,6 +23,15 @@ token_events: List[Dict[str, Any]] = []
 wallet_alerts: List[str] = []
 status_messages: List[str] = ["Starting..."]
 
+# Dynamic watchlist and tracker state (populated at startup)
+WATCHLIST: List[str] = []
+# tokens we are currently tracking (lowercase addresses)
+tracked_tokens: set = set()
+# reference to the web3 instance used by the blockchain listener (set when listener starts)
+web3_instance = None
+# keep wallet tracker threads so they stay alive/referencable
+wallet_tracker_threads: List[threading.Thread] = []
+
 # ---------------------------
 # Helpers
 # ---------------------------
@@ -75,16 +84,24 @@ load_dotenv()
 MONGO_URI = os.getenv("MONGO_URI")
 
 client = db = token_collection = None
+watchlist_collection = None
 if MONGO_URI:
     try:
         client = MongoClient(MONGO_URI, serverSelectionTimeoutMS=3000)
         client.admin.command("ping")  # fail fast if unreachable
         db = client["eth_bot_db"]
         token_collection = db["token_events"]
+        # watchlist collection for persisted watchlist addresses
+        watchlist_collection = db["watchlist"]
         print("Mongo connected")
 
         # Ensure index (do not crash if it fails)
         ensure_unique_index(token_collection)
+        try:
+            # Ensure unique index on address for watchlist
+            watchlist_collection.create_index([("address", ASCENDING)], unique=True, name="uniq_watchlist_address")
+        except Exception as e:
+            print(f"Warning: could not ensure watchlist index: {e}")
     except Exception as e:
         msg = f"Mongo connected but index setup hit an issue: {e}"
         print(msg)
@@ -92,6 +109,23 @@ if MONGO_URI:
         # keep token_collection if connection succeeded
 else:
     print("MONGO_URI not set; running without Mongo")
+
+# load watchlist from disk at startup into the global WATCHLIST
+def load_watchlist():
+    global WATCHLIST
+    try:
+        # Prefer DB-backed watchlist when available
+        if watchlist_collection is not None:
+            docs = list(watchlist_collection.find({}, {"_id": 0, "address": 1}))
+            WATCHLIST = [d.get("address", "").lower() for d in docs]
+        else:
+            with open("resources/watchlist.json", "r") as f:
+                WATCHLIST = [addr.lower() for addr in json.load(f)]
+    except Exception:
+        WATCHLIST = []
+
+# Now that Mongo (if any) has been initialized, load the watchlist
+load_watchlist()
 
 # ---------------------------
 # Blockchain listener
@@ -101,6 +135,7 @@ def run_blockchain_listener():
     print("▶ run_blockchain_listener STARTED", flush=True)
     status_messages.append("Blockchain listener started...")
 
+    global web3_instance, tracked_tokens, WATCHLIST, wallet_tracker_threads
     wss = os.getenv("WEB3_PROVIDER")
     if not wss:
         print("WEB3_PROVIDER not found in .env file.")
@@ -110,7 +145,7 @@ def run_blockchain_listener():
     web3 = Web3(Web3.LegacyWebSocketProvider(wss))
     PUBLIC_ADDRESS = os.getenv("PUBLIC_ADDRESS")
 
-    # Load configs/ABIs/watchlist
+    # Load configs/ABIs
     with open("resources/config.json") as f:
         config = json.load(f)
     UNISWAP_FACTORY = config["UNISWAP_FACTORY"]
@@ -118,8 +153,8 @@ def run_blockchain_listener():
 
     with open("resources/abis.json") as f:
         PAIR_CREATED_ABI = json.load(f)
-    with open("resources/watchlist.json") as f:
-        WATCHLIST = [addr.lower() for addr in json.load(f)]
+    # web3 instance visible to API handlers
+    web3_instance = web3
 
     factory_contract = web3.eth.contract(address=UNISWAP_FACTORY, abi=PAIR_CREATED_ABI)
     event_signature = web3.keccak(text=PAIR_CREATED_SIGNATURE).hex()
@@ -156,9 +191,12 @@ def run_blockchain_listener():
                     print(f"⚠️ {message}")
                     wallet_alerts.append(message)
                     tracked = {token0.lower(), token1.lower()}
+                    # record globally tracked tokens so new wallet trackers can subscribe
+                    tracked_tokens.update(tracked)
                     wallet_tracker = WalletTracker(web3, tracked, WATCHLIST)
                     wallet_tracker_thread = threading.Thread(target=wallet_tracker.run, daemon=True)
                     wallet_tracker_thread.start()
+                    wallet_tracker_threads.append(wallet_tracker_thread)
 
                 analyzer = TokenAnalyzer(web3, token0, token1, pair, config["UNISWAP_ROUTER"], PUBLIC_ADDRESS)
                 result = analyzer.analyze()
@@ -308,9 +346,62 @@ def read_root():
 
 @app.get("/api/watchlist")
 def read_watchlist():
-    with open("resources/watchlist.json", "r") as f:
-        watchlist = json.load(f)
-    return {"watchlist": watchlist}
+    # Return the in-memory WATCHLIST which is loaded from DB or file at startup
+    # and updated on add/remove. This ensures the frontend sees DB-backed changes.
+    return {"watchlist": WATCHLIST}
+
+
+@app.post("/api/watchlist/add")
+def add_watchlist(address: str):
+    """Add a lowercase address to the watchlist and persist to disk."""
+    global WATCHLIST, web3_instance, tracked_tokens, wallet_tracker_threads
+    addr = address.lower()
+    if addr in WATCHLIST:
+        return {"watchlist": WATCHLIST, "added": False}
+    WATCHLIST.append(addr)
+    # persist to DB if available, otherwise to file
+    if watchlist_collection is not None:
+        try:
+            watchlist_collection.update_one({"address": addr}, {"$set": {"address": addr}}, upsert=True)
+        except Exception as e:
+            wallet_alerts.append(f"Failed to persist watchlist to Mongo: {e}")
+    else:
+        with open("resources/watchlist.json", "w") as f:
+            json.dump(WATCHLIST, f, indent=2)
+
+    # start a wallet tracker thread if we have a running web3 instance
+    try:
+        if web3_instance is not None:
+            # Track currently-known tokens
+            wallet_tracker = WalletTracker(web3_instance, set(tracked_tokens), WATCHLIST)
+            t = threading.Thread(target=wallet_tracker.run, daemon=True)
+            t.start()
+            wallet_tracker_threads.append(t)
+            wallet_alerts.append(f"Started wallet tracker for {addr}")
+    except Exception as e:
+        wallet_alerts.append(f"Failed to start wallet tracker for {addr}: {e}")
+
+    return {"watchlist": WATCHLIST, "added": True}
+
+
+@app.post("/api/watchlist/remove")
+def remove_watchlist(address: str):
+    """Remove an address from the watchlist and persist to disk."""
+    global WATCHLIST
+    addr = address.lower()
+    if addr not in WATCHLIST:
+        return {"watchlist": WATCHLIST, "removed": False}
+    WATCHLIST = [a for a in WATCHLIST if a != addr]
+    if watchlist_collection is not None:
+        try:
+            watchlist_collection.delete_one({"address": addr})
+        except Exception as e:
+            wallet_alerts.append(f"Failed to remove watchlist from Mongo: {e}")
+    else:
+        with open("resources/watchlist.json", "w") as f:
+            json.dump(WATCHLIST, f, indent=2)
+    wallet_alerts.append(f"Removed {addr} from watchlist")
+    return {"watchlist": WATCHLIST, "removed": True}
 
 @app.get("/api/status")
 def get_status():
