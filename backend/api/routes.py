@@ -2,6 +2,7 @@ try:
     from fastapi import APIRouter, Header, HTTPException, Body, Form, Request
     from pydantic import BaseModel
     from fastapi.responses import JSONResponse
+    from starlette.requests import Request as StarletteRequest
 except Exception:
     APIRouter = None
     Header = HTTPException = Depends = OAuth2PasswordRequestForm = None
@@ -41,10 +42,9 @@ if router is not None:
 
 
     @router.post("/login")
-    async def login(request: Request):
-        # Inspect headers and raw body for debugging
-        ctype = request.headers.get("content-type", "")
-        raw = await request.body()
+    async def login(req: StarletteRequest):   # rename param to 'req'
+        ctype = req.headers.get("content-type", "")
+        raw = await req.body()
         print(f"[auth] /login content-type={ctype!r} raw_len={len(raw)}")
 
         data = {}
