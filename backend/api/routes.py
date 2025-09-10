@@ -1,7 +1,7 @@
 try:
-    from fastapi import APIRouter, Header, HTTPException, Depends
-    from fastapi.security import OAuth2PasswordRequestForm
+    from fastapi import APIRouter, Header, HTTPException, Body, Form, Request
     from pydantic import BaseModel
+    from fastapi.responses import JSONResponse
 except Exception:
     APIRouter = None
     Header = HTTPException = Depends = OAuth2PasswordRequestForm = None
@@ -9,7 +9,7 @@ except Exception:
 
 import threading
 import os
-from typing import Optional
+from typing import Optional, Any
 
 # Create router only if FastAPI is available; keep router=None otherwise so imports are safe.
 router = APIRouter(prefix="/api") if APIRouter is not None else None
@@ -40,46 +40,55 @@ if router is not None:
             raise HTTPException(status_code=400, detail=str(e))
 
 
-    try:
-        from fastapi import Request
-    except Exception:
-        Request = None
-
     @router.post("/login")
-    async def login(request):
-        # Robust parsing: try JSON body first, then form data. Always return JSON or an HTTPException.
-        user = None
-        pw = None
+    async def login(request: Request):
+        # Inspect headers and raw body for debugging
+        ctype = request.headers.get("content-type", "")
+        raw = await request.body()
+        print(f"[auth] /login content-type={ctype!r} raw_len={len(raw)}")
 
-        # try JSON
-        try:
-            data = await request.json()
-            if isinstance(data, dict):
-                user = data.get("username") or data.get("user") or data.get("email")
-                pw = data.get("password")
-        except Exception:
-            # not JSON or empty body
-            pass
+        data = {}
+        # Try JSON first
+        if "application/json" in ctype:
+            try:
+                data = await request.json()
+                print("[auth] parsed JSON:", data)
+            except Exception as e:
+                print("[auth] JSON parse failed:", e)
 
-        # try form data if missing
-        if not user or not pw:
+        # Then try form if JSON wasn’t parsed or body was not JSON
+        if not data and ("application/x-www-form-urlencoded" in ctype or "multipart/form-data" in ctype):
             try:
                 form = await request.form()
-                user = user or form.get("username") or form.get("user")
-                pw = pw or form.get("password")
+                data = dict(form)
+                print("[auth] parsed FORM:", data)
+            except Exception as e:
+                print("[auth] form parse failed:", e, "(install python-multipart)")
+
+        # Last resort: tolerate weird proxies that drop content-type but still send JSON
+        if not data and raw:
+            try:
+                import json
+                data = json.loads(raw.decode("utf-8"))
+                print("[auth] fallback JSON parse:", data)
             except Exception:
                 pass
 
+        user = (data.get("username") or data.get("user") or data.get("email") or "").strip()
+        pw = (data.get("password") or "").strip()
+
         if not user or not pw:
-            # explicit JSON error body so client.parse doesn't fail on empty response
+            print(f"[auth] No credentials extracted. data={data}")
             raise HTTPException(status_code=400, detail="No credentials provided")
 
-        print(f"[auth] login attempt: user={user}")
+        print(f"[auth] login attempt user={user}")
         token = auth_manager.authenticate(user, pw)
-        print(f"[auth] login result for {user}: {'token' if token else 'no-token'}")
+        print(f"[auth] login result for {user}: {'OK' if token else 'INVALID'}")
+
         if not token:
             raise HTTPException(status_code=401, detail="Invalid credentials")
-        return {"access_token": token, "token_type": "bearer"}
+
+        return JSONResponse({"access_token": token, "token_type": "bearer"})
 
 
     @router.get("/watchlist")
