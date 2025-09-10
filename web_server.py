@@ -238,7 +238,7 @@ def run_blockchain_listener():
 
                 # Watchlist alert / wallet tracker (unchanged)
                 if deployer in WATCHLIST:
-                    message = f"Deployer {deployer} is in watchlist! ✅"
+                    message = f"Deployer {deployer} is in watchlist "
                     print(f"⚠️ {message}")
                     wallet_alerts.append(message)
                     tracked = {token0.lower(), token1.lower()}

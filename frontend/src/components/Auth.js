@@ -25,16 +25,29 @@ function Auth({ apiBase = '', onLogin }) {
         setError(`Login failed: ${res.status} ${txt}`);
         return;
       }
-      const data = await res.json();
-      const token = data.access_token;
+      // defensive parse: some responses may be empty (no body)
+      let token = null;
+      try {
+        const txt = await res.text();
+        const data = txt ? JSON.parse(txt) : {};
+        token = data.access_token;
+      } catch (e) {
+        // ignore parse errors; token stays null
+        token = null;
+      }
       if (token) {
         localStorage.setItem('ethbot_token', token);
         // fetch profile
         try {
           const profileRes = await fetch(`${apiBase}/api/me`, { headers: { Authorization: `Bearer ${token}` } });
           if (profileRes.ok) {
-            const profile = await profileRes.json();
-            onLogin && onLogin(token, profile.username);
+            try {
+              const ptxt = await profileRes.text();
+              const profile = ptxt ? JSON.parse(ptxt) : {};
+              onLogin && onLogin(token, profile.username || null);
+            } catch (e) {
+              onLogin && onLogin(token, null);
+            }
           } else {
             onLogin && onLogin(token, null);
           }

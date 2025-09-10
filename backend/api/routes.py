@@ -35,26 +35,37 @@ if router is not None:
 
 
     try:
-        from fastapi import Body
+        from fastapi import Request
     except Exception:
-        Body = None
+        Request = None
 
     @router.post("/login")
-    def login(form=None, username: Optional[str] = Body(None), password: Optional[str] = Body(None)):
-        # Support two modes:
-        #  - OAuth2PasswordRequestForm via FastAPI Depends (form provided)
-        #  - JSON body with {"username": "...", "password": "..."}
+    async def login(request):
+        # Robust parsing: try JSON body first, then form data. Always return JSON or an HTTPException.
         user = None
         pw = None
-        if form is not None:
-            # FastAPI's OAuth2 form
-            user = getattr(form, 'username', None)
-            pw = getattr(form, 'password', None)
-        else:
-            user = username
-            pw = password
+
+        # try JSON
+        try:
+            data = await request.json()
+            if isinstance(data, dict):
+                user = data.get("username") or data.get("user") or data.get("email")
+                pw = data.get("password")
+        except Exception:
+            # not JSON or empty body
+            pass
+
+        # try form data if missing
+        if not user or not pw:
+            try:
+                form = await request.form()
+                user = user or form.get("username") or form.get("user")
+                pw = pw or form.get("password")
+            except Exception:
+                pass
 
         if not user or not pw:
+            # explicit JSON error body so client.parse doesn't fail on empty response
             raise HTTPException(status_code=400, detail="No credentials provided")
 
         token = auth_manager.authenticate(user, pw)
