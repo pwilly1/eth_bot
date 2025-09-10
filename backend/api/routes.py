@@ -8,6 +8,7 @@ except Exception:
     BaseModel = object
 
 import threading
+import os
 from typing import Optional
 
 # Create router only if FastAPI is available; keep router=None otherwise so imports are safe.
@@ -99,6 +100,22 @@ if router is not None:
         except Exception:
             uwl = []
         return {"username": user, "watchlist": uwl}
+
+
+    @router.get("/_ping")
+    def _ping():
+        # lightweight diagnostic endpoint to confirm the API returns JSON on the deployed host
+        try:
+            info = {
+                "ok": True,
+                "mongo_env_set": bool(os.getenv("MONGO_URI")),
+                "web3_provider_set": bool(os.getenv("WEB3_PROVIDER")),
+                "users_collection_present": bool(getattr(auth_manager, 'users_collection', None)),
+                "watchlist_count": len(WATCHLIST) if WATCHLIST is not None else 0,
+            }
+        except Exception as e:
+            info = {"ok": False, "error": str(e)}
+        return info
 
 
     @router.post("/watchlist/add")
