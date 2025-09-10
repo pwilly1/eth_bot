@@ -29,7 +29,21 @@ function HistoricalData() {
   if (endMs) params.set('end_ms', String(endMs));
       const res = await fetch('/api/historical_data?' + params.toString());
       const data = await res.json();
-      setHistoricalData(data || []);
+      // backend may return either a bare array or an object wrapper; normalize to array
+      let list = [];
+      if (Array.isArray(data)) {
+        list = data;
+      } else if (data && typeof data === 'object') {
+        if (Array.isArray(data.historical_data)) list = data.historical_data;
+        else if (Array.isArray(data.token_events)) list = data.token_events;
+        else if (Array.isArray(data.results)) list = data.results;
+        else {
+          // try to extract array-ish values
+          const vals = Object.values(data).find(v => Array.isArray(v));
+          if (Array.isArray(vals)) list = vals;
+        }
+      }
+      setHistoricalData(list);
     } catch (error) {
       console.error('Error fetching historical data:', error);
     }

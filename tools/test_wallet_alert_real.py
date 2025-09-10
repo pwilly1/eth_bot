@@ -9,7 +9,7 @@ import sys
 import types
 import json
 
-# Make sure project root is on sys.path
+
 proj_root = os.getcwd()
 if proj_root not in sys.path:
     sys.path.insert(0, proj_root)

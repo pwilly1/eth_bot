@@ -6,17 +6,35 @@ from contextlib import asynccontextmanager
 from typing import List, Dict, Any, Optional
 from datetime import datetime, timezone
 
-from fastapi import FastAPI, HTTPException, Query
-from fastapi.middleware.cors import CORSMiddleware
-from dotenv import load_dotenv
-from pymongo import MongoClient, ASCENDING
-from pymongo.errors import DuplicateKeyError, ServerSelectionTimeoutError, PyMongoError
-from web3 import Web3
+# This module exposes runtime state and the blockchain listener.
+# FastAPI application and routes are created in `backend.api`.
+try:
+    from dotenv import load_dotenv
+except Exception:
+    def load_dotenv():
+        return None
 
-from Core.analyzer.token_analyzer import TokenAnalyzer
-from Core.wallet_tracker import WalletTracker
+try:
+    from pymongo import MongoClient, ASCENDING
+    from pymongo.errors import DuplicateKeyError, ServerSelectionTimeoutError, PyMongoError
+except Exception:
+    MongoClient = None
+    ASCENDING = None
+    DuplicateKeyError = Exception
+    ServerSelectionTimeoutError = Exception
+    PyMongoError = Exception
 
-# ---------------------------
+try:
+    from web3 import Web3
+except Exception:
+    Web3 = None
+
+# Import heavy Core modules lazily where needed to avoid import-time
+# dependency on web3 when tooling imports this module.
+from backend.auth import AuthManager
+from backend.watchlist import WatchlistManager
+
+
 # In-memory state
 # ---------------------------
 token_events: List[Dict[str, Any]] = []
@@ -32,7 +50,7 @@ web3_instance = None
 # keep wallet tracker threads so they stay alive/referencable
 wallet_tracker_threads: List[threading.Thread] = []
 
-# ---------------------------
+
 # Helpers
 # ---------------------------
 def ensure_unique_index(collection):
@@ -77,14 +95,15 @@ def ensure_unique_index(collection):
     except PyMongoError as e:
         print(f"Index ensure warning: {e}")
 
-# ---------------------------
-# Mongo init (safe)
+
+# Mongo init
 # ---------------------------
 load_dotenv()
 MONGO_URI = os.getenv("MONGO_URI")
 
 client = db = token_collection = None
 watchlist_collection = None
+users_collection = None
 if MONGO_URI:
     try:
         client = MongoClient(MONGO_URI, serverSelectionTimeoutMS=3000)
@@ -93,6 +112,7 @@ if MONGO_URI:
         token_collection = db["token_events"]
         # watchlist collection for persisted watchlist addresses
         watchlist_collection = db["watchlist"]
+        users_collection = db["users"]
         print("Mongo connected")
 
         # Ensure index (do not crash if it fails)
@@ -106,7 +126,7 @@ if MONGO_URI:
         msg = f"Mongo connected but index setup hit an issue: {e}"
         print(msg)
         status_messages.append(msg)
-        # keep token_collection if connection succeeded
+        # keep token_collection if connection succeeded                
 else:
     print("MONGO_URI not set; running without Mongo")
 
@@ -116,16 +136,28 @@ def load_watchlist():
     try:
         # Prefer DB-backed watchlist when available
         if watchlist_collection is not None:
-            docs = list(watchlist_collection.find({}, {"_id": 0, "address": 1}))
-            WATCHLIST = [d.get("address", "").lower() for d in docs]
+            # DB-backed global watchlist stored in watchlist_collection
+            try:
+                docs = list(watchlist_collection.find({}, {"_id": 0, "address": 1}))
+                WATCHLIST = [d.get("address", "").lower() for d in docs if d.get("address")]
+            except Exception as e:
+                print(f"Warning: failed to load watchlist from DB: {e}")
+                WATCHLIST = []
         else:
+            # Fallback to on-disk watchlist
             with open("resources/watchlist.json", "r") as f:
-                WATCHLIST = [addr.lower() for addr in json.load(f)]
+                data = json.load(f)
+                WATCHLIST = [addr.lower() for addr in (data or [])]
     except Exception:
+        print("Warning: failed to load watchlist (fallback to empty)")
         WATCHLIST = []
 
 # Now that Mongo (if any) has been initialized, load the watchlist
 load_watchlist()
+
+# Initialize managers (use DB collections when available)
+auth_manager = AuthManager(users_collection=users_collection, jwt_secret=os.getenv("JWT_SECRET"))
+wl_manager = WatchlistManager(watchlist_collection=watchlist_collection, users_collection=users_collection)
 
 # ---------------------------
 # Blockchain listener
@@ -155,6 +187,25 @@ def run_blockchain_listener():
         PAIR_CREATED_ABI = json.load(f)
     # web3 instance visible to API handlers
     web3_instance = web3
+    # expose web3 instance to the rest of the app
+    # lazy-import analyzer and wallet tracker implementations so editors/tools
+    analyzer_class = None
+    wallet_tracker_class = None
+    try:
+        from backend.Core.analyzer.token_analyzer import TokenAnalyzer as _TokenAnalyzer
+        analyzer_class = _TokenAnalyzer
+    except Exception as e:
+        msg = f"TokenAnalyzer import failed: {e}"
+        print(msg)
+        status_messages.append(msg)
+
+    try:
+        from backend.Core.wallet_tracker import WalletTracker as _WalletTracker
+        wallet_tracker_class = _WalletTracker
+    except Exception as e:
+        msg = f"WalletTracker import failed: {e}"
+        print(msg)
+        status_messages.append(msg)
 
     factory_contract = web3.eth.contract(address=UNISWAP_FACTORY, abi=PAIR_CREATED_ABI)
     event_signature = web3.keccak(text=PAIR_CREATED_SIGNATURE).hex()
@@ -193,13 +244,35 @@ def run_blockchain_listener():
                     tracked = {token0.lower(), token1.lower()}
                     # record globally tracked tokens so new wallet trackers can subscribe
                     tracked_tokens.update(tracked)
-                    wallet_tracker = WalletTracker(web3, tracked, WATCHLIST)
-                    wallet_tracker_thread = threading.Thread(target=wallet_tracker.run, daemon=True)
-                    wallet_tracker_thread.start()
-                    wallet_tracker_threads.append(wallet_tracker_thread)
+                    if wallet_tracker_class is not None:
+                        try:
+                            wallet_tracker = wallet_tracker_class(web3, tracked, WATCHLIST)
+                            wallet_tracker_thread = threading.Thread(target=wallet_tracker.run, daemon=True)
+                            wallet_tracker_thread.start()
+                            wallet_tracker_threads.append(wallet_tracker_thread)
+                        except Exception as e:
+                            msg = f"Failed to start WalletTracker: {e}"
+                            print(msg)
+                            status_messages.append(msg)
+                    else:
+                        msg = "WalletTracker implementation not available; skipping wallet tracker start."
+                        print(msg)
+                        status_messages.append(msg)
 
-                analyzer = TokenAnalyzer(web3, token0, token1, pair, config["UNISWAP_ROUTER"], PUBLIC_ADDRESS)
-                result = analyzer.analyze()
+                if analyzer_class is None:
+                    err = "TokenAnalyzer implementation not available; skipping analysis."
+                    print(err)
+                    status_messages.append(err)
+                    result = {}
+                else:
+                    try:
+                        analyzer = analyzer_class(web3, token0, token1, pair, config["UNISWAP_ROUTER"], PUBLIC_ADDRESS)
+                        result = analyzer.analyze()
+                    except Exception as e:
+                        err = f"TokenAnalyzer failed: {e}"
+                        print(err)
+                        status_messages.append(err)
+                        result = {}
 
                 # ---- Robust identifiers for idempotency
                 raw_txh = log.get("transactionHash")
@@ -306,382 +379,3 @@ def run_blockchain_listener():
                 status_messages.append("Blockchain filter re-created.")
 
             time.sleep(5)
-
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    listener_thread = threading.Thread(target=run_blockchain_listener, daemon=True)
-    listener_thread.start()
-    yield
-    print("Shutting down...")
-    if client is not None:
-        try:
-            client.close()
-            print("MongoDB client closed.")
-        except Exception:
-            pass
-
-app = FastAPI(lifespan=lifespan)
-
-# ---------------------------
-# CORS
-# ---------------------------
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=[
-        "https://eth-tracker-front.onrender.com",
-        "http://localhost:3000",
-        "http://127.0.0.1:3000",
-    ],
-    allow_credentials=False,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-# ---------------------------
-# API routes
-# ---------------------------
-@app.get("/api/")
-def read_root():
-    return {"status": "ok"}
-
-@app.get("/api/watchlist")
-def read_watchlist():
-    # Return the in-memory WATCHLIST which is loaded from DB or file at startup
-    # and updated on add/remove. This ensures the frontend sees DB-backed changes.
-    return {"watchlist": WATCHLIST}
-
-
-@app.post("/api/watchlist/add")
-def add_watchlist(address: str):
-    """Add a lowercase address to the watchlist and persist to disk."""
-    global WATCHLIST, web3_instance, tracked_tokens, wallet_tracker_threads
-    addr = address.lower()
-    if addr in WATCHLIST:
-        return {"watchlist": WATCHLIST, "added": False}
-    WATCHLIST.append(addr)
-    # persist to DB if available, otherwise to file
-    if watchlist_collection is not None:
-        try:
-            watchlist_collection.update_one({"address": addr}, {"$set": {"address": addr}}, upsert=True)
-        except Exception as e:
-            wallet_alerts.append(f"Failed to persist watchlist to Mongo: {e}")
-    else:
-        with open("resources/watchlist.json", "w") as f:
-            json.dump(WATCHLIST, f, indent=2)
-
-    # start a wallet tracker thread if we have a running web3 instance
-    try:
-        if web3_instance is not None:
-            # Track currently-known tokens
-            wallet_tracker = WalletTracker(web3_instance, set(tracked_tokens), WATCHLIST)
-            t = threading.Thread(target=wallet_tracker.run, daemon=True)
-            t.start()
-            wallet_tracker_threads.append(t)
-            wallet_alerts.append(f"Started wallet tracker for {addr}")
-    except Exception as e:
-        wallet_alerts.append(f"Failed to start wallet tracker for {addr}: {e}")
-
-    return {"watchlist": WATCHLIST, "added": True}
-
-
-@app.post("/api/watchlist/remove")
-def remove_watchlist(address: str):
-    """Remove an address from the watchlist and persist to disk."""
-    global WATCHLIST
-    addr = address.lower()
-    if addr not in WATCHLIST:
-        return {"watchlist": WATCHLIST, "removed": False}
-    WATCHLIST = [a for a in WATCHLIST if a != addr]
-    if watchlist_collection is not None:
-        try:
-            watchlist_collection.delete_one({"address": addr})
-        except Exception as e:
-            wallet_alerts.append(f"Failed to remove watchlist from Mongo: {e}")
-    else:
-        with open("resources/watchlist.json", "w") as f:
-            json.dump(WATCHLIST, f, indent=2)
-    wallet_alerts.append(f"Removed {addr} from watchlist")
-    return {"watchlist": WATCHLIST, "removed": True}
-
-@app.get("/api/status")
-def get_status():
-    return {"status": status_messages[-1] if status_messages else "No status yet."}
-
-@app.get("/api/token_events")
-def get_token_events(
-    q: Optional[str] = Query(None, description="search token address/name/symbol"),
-    honeypot: Optional[bool] = Query(None, description="filter honeypot true/false"),
-    min_liquidity: Optional[float] = Query(None, description="minimum liquidity in ETH"),
-    ownership: Optional[bool] = Query(None, description="ownership renounced true/false"),
-    start_ms: Optional[int] = Query(None, description="start time in ms since epoch"),
-    end_ms: Optional[int] = Query(None, description="end time in ms since epoch"),
-    limit: int = Query(200, description="max results"),
-):
-    """
-    Return only plain JSON types the UI expects; never 500 on bad records.
-    Timestamps are returned in **ms** for your UI.
-    """
-    try:
-        docs: List[Dict[str, Any]] = []
-
-        # start of today (UTC): only today's events
-        # compute start of today in local timezone and convert to UTC timestamp
-        # this ensures "today" matches the local day of the user running the server
-        local_now = datetime.now().astimezone()
-        start_local = local_now.replace(hour=0, minute=0, second=0, microsecond=0)
-        start_of_day = int(start_local.astimezone(timezone.utc).timestamp())
-
-        # override start/end if provided (client sends ms)
-        if start_ms is not None:
-            start_of_day = int(start_ms // 1000)
-        end_of_day: Optional[int] = None
-        if end_ms is not None:
-            end_of_day = int(end_ms // 1000)
-
-        if token_collection is not None:
-            query: Dict[str, Any] = {"timestamp": {"$gte": start_of_day}}
-            if end_of_day is not None:
-                query["timestamp"]["$lte"] = end_of_day
-            if honeypot is not None:
-                query["honeypot"] = bool(honeypot)
-            if min_liquidity is not None:
-                query["liquidity_eth"] = {"$gte": float(min_liquidity)}
-            if ownership is not None:
-                query["ownership_renounced"] = bool(ownership)
-            if q:
-                regex = {"$regex": q, "$options": "i"}
-                query["$or"] = [
-                    {"address": regex},
-                    {"token0_info.address": regex},
-                    {"token1_info.address": regex},
-                    {"token0_info.name": regex},
-                    {"token1_info.name": regex},
-                    {"token0_info.symbol": regex},
-                    {"token1_info.symbol": regex},
-                ]
-
-            fields = {
-                "_id": 0,
-                "timestamp": 1,
-                "address": 1,
-                "liquidity_eth": 1,
-                "honeypot": 1,
-                "ownership_renounced": 1,
-                "token0_info": 1,
-                "token1_info": 1,
-            }
-            docs = list(token_collection.find(query, fields).sort("timestamp", -1).limit(limit))
-        else:
-            # in-memory fallback
-            for e in token_events:
-                ts = int(e.get("timestamp", 0))
-                if ts < start_of_day:
-                    continue
-                if end_of_day is not None and ts > end_of_day:
-                    continue
-                if honeypot is not None and bool(e.get("honeypot", False)) != bool(honeypot):
-                    continue
-                if min_liquidity is not None and float(e.get("liquidity_eth", 0.0)) < float(min_liquidity):
-                    continue
-                if ownership is not None and bool(e.get("ownership_renounced", False)) != bool(ownership):
-                    continue
-                if q:
-                    ql = q.lower()
-                    found = False
-                    for val in [
-                        str(e.get("address", "")),
-                        str((e.get("token0_info") or {}).get("address", "")),
-                        str((e.get("token1_info") or {}).get("address", "")),
-                        str((e.get("token0_info") or {}).get("name", "")),
-                        str((e.get("token1_info") or {}).get("name", "")),
-                        str((e.get("token0_info") or {}).get("symbol", "")),
-                        str((e.get("token1_info") or {}).get("symbol", "")),
-                    ]:
-                        if ql in val.lower():
-                            found = True
-                            break
-                    if not found:
-                        continue
-                docs.append(e)
-            docs = sorted(docs, key=lambda x: int(x.get("timestamp", 0)), reverse=True)[:limit]
-
-        safe = []
-        for d in docs:
-            safe.append({
-                "timestamp": int(d.get("timestamp", 0)) * 1000,  # ms for UI
-                "address": str(d.get("address", "")),
-                "liquidity_eth": float(d.get("liquidity_eth", 0.0)),
-                "honeypot": bool(d.get("honeypot", False)),
-                "ownership_renounced": bool(d.get("ownership_renounced", False)),
-                "token0": d.get("token0_info") or {},
-                "token1": d.get("token1_info") or {},
-            })
-        return {"token_events": safe}
-
-    except (ServerSelectionTimeoutError, PyMongoError) as e:
-        status_messages.append(f"Mongo error: {e}")
-        safe_mem = [{
-            "timestamp": int(ev.get("timestamp", 0)) * 1000,
-            "address": str(ev.get("address", "")),
-            "liquidity_eth": float(ev.get("liquidity_eth", 0.0)),
-            "honeypot": bool(ev.get("honeypot", False)),
-            "ownership_renounced": bool(ev.get("ownership_renounced", False)),
-            "token0": ev.get("token0_info") or {},
-            "token1": ev.get("token1_info") or {},
-        } for ev in token_events]
-        return {"token_events": safe_mem}
-    except Exception as ex:
-        raise HTTPException(status_code=500, detail=f"/api/token_events failed: {ex}")
-
-@app.get("/api/wallet_alerts")
-def get_wallet_alerts():
-    return {"wallet_alerts": wallet_alerts}
-
-@app.get("/api/historical_data")
-def get_historical_data(
-    q: Optional[str] = Query(None, description="search token address/name/symbol"),
-    honeypot: Optional[bool] = Query(None, description="filter honeypot true/false"),
-    min_liquidity: Optional[float] = Query(None, description="minimum liquidity in ETH"),
-    ownership: Optional[bool] = Query(None, description="ownership renounced true/false"),
-    start_ms: Optional[int] = Query(None, description="start time in ms since epoch"),
-    end_ms: Optional[int] = Query(None, description="end time in ms since epoch"),
-    limit: int = Query(500, description="max results"),
-):
-    """
-    Return an array; normalize token0/token1 keys and convert timestamp to ms
-    so the current React code renders correctly.
-    """
-    try:
-        docs: List[Dict[str, Any]] = []
-        if token_collection is not None:
-            query: Dict[str, Any] = {}
-            if honeypot is not None:
-                query["honeypot"] = bool(honeypot)
-            if min_liquidity is not None:
-                query["liquidity_eth"] = {"$gte": float(min_liquidity)}
-            if ownership is not None:
-                query["ownership_renounced"] = bool(ownership)
-            if start_ms is not None or end_ms is not None:
-                query["timestamp"] = {}
-                if start_ms is not None:
-                    query["timestamp"]["$gte"] = int(start_ms // 1000)
-                if end_ms is not None:
-                    query["timestamp"]["$lte"] = int(end_ms // 1000)
-            if q:
-                regex = {"$regex": q, "$options": "i"}
-                query["$or"] = [
-                    {"address": regex},
-                    {"token0_info.address": regex},
-                    {"token1_info.address": regex},
-                    {"token0_info.name": regex},
-                    {"token1_info.name": regex},
-                    {"token0_info.symbol": regex},
-                    {"token1_info.symbol": regex},
-                ]
-
-            fields = {
-                "_id": 0,
-                "timestamp": 1,
-                "liquidity_eth": 1,
-                "honeypot": 1,
-                "ownership_renounced": 1,
-                "token0_info": 1,
-                "token1_info": 1,
-                "address": 1,
-            }
-            docs = list(token_collection.find(query, fields).sort("timestamp", -1).limit(limit))
-        else:
-            # in-memory fallback
-            for e in token_events:
-                if honeypot is not None and bool(e.get("honeypot", False)) != bool(honeypot):
-                    continue
-                if min_liquidity is not None and float(e.get("liquidity_eth", 0.0)) < float(min_liquidity):
-                    continue
-                if ownership is not None and bool(e.get("ownership_renounced", False)) != bool(ownership):
-                    continue
-                if start_ms is not None and int(e.get("timestamp", 0)) * 1000 < start_ms:
-                    continue
-                if end_ms is not None and int(e.get("timestamp", 0)) * 1000 > end_ms:
-                    continue
-                if q:
-                    ql = q.lower()
-                    found = False
-                    for val in [
-                        str(e.get("address", "")),
-                        str((e.get("token0_info") or {}).get("address", "")),
-                        str((e.get("token1_info") or {}).get("address", "")),
-                        str((e.get("token0_info") or {}).get("name", "")),
-                        str((e.get("token1_info") or {}).get("name", "")),
-                        str((e.get("token0_info") or {}).get("symbol", "")),
-                        str((e.get("token1_info") or {}).get("symbol", "")),
-                    ]:
-                        if ql in val.lower():
-                            found = True
-                            break
-                    if not found:
-                        continue
-                docs.append(e)
-            docs = sorted(docs, key=lambda x: int(x.get("timestamp", 0)), reverse=True)[:limit]
-
-        out = []
-        for e in docs:
-            t0 = e.get("token0_info") or e.get("token0") or {}
-            t1 = e.get("token1_info") or e.get("token1") or {}
-            out.append({
-                "timestamp": int(e.get("timestamp", 0)) * 1000,          # ms (UI expects ms)
-                "liquidity_eth": float(e.get("liquidity_eth", 0.0)),
-                "honeypot": bool(e.get("honeypot", False)),
-                "ownership_renounced": bool(e.get("ownership_renounced", False)),
-                "token0": {
-                    "name":   str(t0.get("name", "")),
-                    "symbol": str(t0.get("symbol", "")),
-                    "address":str(t0.get("address", "")),
-                },
-                "token1": {
-                    "name":   str(t1.get("name", "")),
-                    "symbol": str(t1.get("symbol", "")),
-                    "address":str(t1.get("address", "")),
-                },
-                "address": str(e.get("address", "")),
-            })
-        return out
-    except (ServerSelectionTimeoutError, PyMongoError) as e:
-        status_messages.append(f"Mongo error: {e}")
-        return []
-    except Exception as ex:
-        raise HTTPException(status_code=500, detail=f"/api/historical_data failed: {ex}")
-
-
-
-@app.get("/api/token/{address}")
-def get_token_detail(address: str):
-    """Return detailed info for a single token address (normalize and return helpful fields)."""
-    try:
-        addr = address.lower()
-        if token_collection is not None:
-            doc = token_collection.find_one({"address": {"$regex": f"^{addr}$", "$options": "i"}}, {"_id": 0})
-        else:
-            doc = next((e for e in token_events if str(e.get("address", "")).lower() == addr), None)
-
-        if not doc:
-            raise HTTPException(status_code=404, detail="Token not found")
-
-        # Normalize token0/token1
-        t0 = doc.get("token0_info") or doc.get("token0") or {}
-        t1 = doc.get("token1_info") or doc.get("token1") or {}
-
-        return {
-            "timestamp": int(doc.get("timestamp", 0)) * 1000,
-            "address": str(doc.get("address", "")),
-            "pair_address": str(doc.get("pair_address", "")),
-            "liquidity_eth": float(doc.get("liquidity_eth", 0.0)),
-            "honeypot": bool(doc.get("honeypot", False)),
-            "ownership_renounced": bool(doc.get("ownership_renounced", False)),
-            "token0": {"name": str(t0.get("name", "")), "symbol": str(t0.get("symbol", "")), "address": str(t0.get("address", ""))},
-            "token1": {"name": str(t1.get("name", "")), "symbol": str(t1.get("symbol", "")), "address": str(t1.get("address", ""))},
-            "raw": doc,
-        }
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"/api/token/{address} failed: {e}")

@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { Paper, TextField, Button, List, ListItem, ListItemText, Typography } from '@mui/material';
 
-function WatchlistManager() {
+function WatchlistManager({ token = null }) {
   const API_BASE = process.env.REACT_APP_API_BASE || '';
   const [watchlist, setWatchlist] = useState([]);
   const [addr, setAddr] = useState('');
@@ -11,7 +11,9 @@ function WatchlistManager() {
   const fetchWatchlist = async () => {
     setError(null);
     try {
-      const res = await fetch(`${API_BASE}/api/watchlist`);
+      const headers = {};
+      if (token) headers['Authorization'] = `Bearer ${token}`;
+      const res = await fetch(`${API_BASE}/api/watchlist`, { headers });
       const ct = res.headers.get('content-type') || '';
       if (!res.ok) {
         const txt = await res.text();
@@ -36,14 +38,16 @@ function WatchlistManager() {
     }
   };
 
-  useEffect(() => { fetchWatchlist(); }, []);
+  useEffect(() => { fetchWatchlist(); }, [token]);
 
   const addAddress = async () => {
     if (!addr) return;
     setError(null);
     setLoading(true);
     try {
-      const res = await fetch(`${API_BASE}/api/watchlist/add?address=${encodeURIComponent(addr)}`, { method: 'POST' });
+  const headers = {};
+  if (token) headers['Authorization'] = `Bearer ${token}`;
+  const res = await fetch(`${API_BASE}/api/watchlist/add?address=${encodeURIComponent(addr)}`, { method: 'POST', headers });
       const ct = res.headers.get('content-type') || '';
       if (!res.ok) {
         const txt = await res.text();
@@ -70,7 +74,9 @@ function WatchlistManager() {
     setError(null);
     setLoading(true);
     try {
-      const res = await fetch(`${API_BASE}/api/watchlist/remove?address=${encodeURIComponent(a)}`, { method: 'POST' });
+  const headers = {};
+  if (token) headers['Authorization'] = `Bearer ${token}`;
+  const res = await fetch(`${API_BASE}/api/watchlist/remove?address=${encodeURIComponent(a)}`, { method: 'POST', headers });
       const ct = res.headers.get('content-type') || '';
       if (!res.ok) {
         const txt = await res.text();

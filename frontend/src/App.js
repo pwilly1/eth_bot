@@ -7,6 +7,7 @@ import TokenEvents from './components/TokenEvents';
 import WalletAlerts from './components/WalletAlerts';
 import HistoricalData from './components/HistoricalData';
 import WatchlistManager from './components/WatchlistManager';
+import Auth from './components/Auth';
 
 const darkTheme = createTheme({
   palette: {
@@ -47,6 +48,8 @@ function TabPanel(props) {
 function App() {
   const [status, setStatus] = useState('Loading...');
   const [tabValue, setTabValue] = useState(0);
+  const [token, setToken] = useState(localStorage.getItem('ethbot_token') || null);
+  const [username, setUsername] = useState(null);
 
   useEffect(() => {
     const fetchStatus = async () => {
@@ -79,6 +82,10 @@ function App() {
             ETH Bot
           </Typography>
           <Chip label={`Status: ${status}`} color="secondary" size="small" />
+          <div style={{ marginLeft: 12 }}>
+            <Auth apiBase="" onLogin={(t, u) => { setToken(t); setUsername(u); }} />
+            {username && <div style={{ marginLeft: 8 }}>User: {username}</div>}
+          </div>
         </Toolbar>
       </AppBar>
   <Container maxWidth="lg" sx={{ py: 4 }}>
@@ -100,7 +107,7 @@ function App() {
           <HistoricalData />
         </TabPanel>
           <TabPanel value={tabValue} index={3}>
-            <WatchlistManager />
+            <WatchlistManager token={token} />
           </TabPanel>
       </Container>
     </ThemeProvider>

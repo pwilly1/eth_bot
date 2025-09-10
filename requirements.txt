@@ -6,3 +6,6 @@ web3
 requests
 gunicorn
 pymongo
+python-multipart
+python-jose[cryptography]
+passlib[bcrypt]

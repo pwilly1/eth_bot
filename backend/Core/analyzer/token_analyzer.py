@@ -1,7 +1,7 @@
-from Core.token_info import get_token_info
-from Core.checks.liquidity import check_liquidity
-from Core.checks.honeypot_check import simulate_trade
-from Core.checks.ownership_check import is_renounced
+from backend.Core.token_info import get_token_info
+from backend.Core.checks.liquidity import check_liquidity
+from backend.Core.checks.honeypot_check import simulate_trade
+from backend.Core.checks.ownership_check import is_renounced
 
 import json
 import os
