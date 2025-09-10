@@ -12,9 +12,6 @@ class WatchlistManager:
 
     def get_global_watchlist(self) -> List[str]:
         # Use DB-backed global watchlist when a collection is available.
-        # (Previously this wrongly required users_collection to be None; that
-        # caused writes to go to disk while reads used the DB, making items
-        # disappear on reload.)
         if self.watchlist_collection is not None:
             docs = list(self.watchlist_collection.find({}, {"_id": 0, "address": 1}))
             return [d.get("address", "").lower() for d in docs]
@@ -26,7 +23,6 @@ class WatchlistManager:
             return []
 
     def save_global_watchlist(self, wl: List[str]):
-        # Persist global watchlist to DB when available; otherwise write file-backed.
         if self.watchlist_collection is not None:
             # rewrite collection with idempotent upserts
             for a in wl:

@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 import { Dialog, DialogTitle, DialogContent, DialogActions, TextField, Button } from '@mui/material';
 
-function Auth({ apiBase = '', onLogin }) {
+function Auth({ apiBase= process.env.REACT_APP_BACKEND_URL, onLogin }) {
   const [open, setOpen] = useState(false);
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');

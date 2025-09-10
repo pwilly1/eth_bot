@@ -2,7 +2,8 @@ import React, { useState, useEffect } from 'react';
 import { Paper, TextField, Button, List, ListItem, ListItemText, Typography } from '@mui/material';
 
 function WatchlistManager({ token = null }) {
-  const API_BASE = process.env.REACT_APP_BACKEND_URL || '';
+  // Support both common env var names to avoid build-time mismatches
+  const API_BASE = process.env.REACT_APP_API_BASE || process.env.REACT_APP_BACKEND_URL || '';
   const [watchlist, setWatchlist] = useState([]);
   const [addr, setAddr] = useState('');
   const [loading, setLoading] = useState(false);
