@@ -110,7 +110,8 @@ if router is not None:
                 "ok": True,
                 "mongo_env_set": bool(os.getenv("MONGO_URI")),
                 "web3_provider_set": bool(os.getenv("WEB3_PROVIDER")),
-                "users_collection_present": bool(getattr(auth_manager, 'users_collection', None)),
+                # pymongo Collection doesn't support truth testing; compare to None explicitly
+                "users_collection_present": (getattr(auth_manager, 'users_collection', None) is not None),
                 "watchlist_count": len(WATCHLIST) if WATCHLIST is not None else 0,
             }
         except Exception as e:
